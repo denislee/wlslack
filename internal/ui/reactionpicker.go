@@ -222,7 +222,7 @@ func (r *ReactionPicker) Layout(gtx layout.Context, th *Theme) layout.Dimensions
 								ed := material.Editor(th.Mat, &r.editor, "Search emoji…")
 								ed.Color = th.Pal.TextStrong
 								ed.HintColor = th.Pal.TextMuted
-								ed.SelectionColor = withAlpha(th.Pal.Selection, 0x66)
+								ed.SelectionColor = WithAlpha(th.Pal.Selection, 0x66)
 								return ed.Layout(gtx)
 							})
 						})

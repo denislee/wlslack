@@ -147,7 +147,7 @@ func (q *QuickSwitcher) Layout(gtx layout.Context, th *Theme) layout.Dimensions 
 								ed := material.Editor(th.Mat, &q.editor, "Jump to channel or DM…")
 								ed.Color = th.Pal.TextStrong
 								ed.HintColor = th.Pal.TextMuted
-								ed.SelectionColor = withAlpha(th.Pal.Selection, 0x66)
+								ed.SelectionColor = WithAlpha(th.Pal.Selection, 0x66)
 								th.applyEditorFont(&ed, th.Fonts.Search)
 								return ed.Layout(gtx)
 							})

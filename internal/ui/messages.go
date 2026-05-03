@@ -617,7 +617,7 @@ func (m *MessagesView) authorAvatarOp(_ layout.Context) (paint.ImageOp, bool) {
 func (m *MessagesView) layoutAuthorField(gtx layout.Context, th *Theme, idx int, f authorField) layout.Dimensions {
 	bg := th.Pal.BgSidebar
 	if idx == m.authorSelected {
-		bg = withAlpha(th.Pal.Selection, 0x40)
+		bg = WithAlpha(th.Pal.Selection, 0x40)
 	}
 	return paintedBg(gtx, bg, func(gtx layout.Context) layout.Dimensions {
 		return layout.Inset{
@@ -1046,9 +1046,9 @@ func (m *MessagesView) layoutReactionChip(gtx layout.Context, th *Theme, fm *sla
 	textColor := th.Pal.Text
 	borderColor := th.Pal.Border
 	if r.HasMe {
-		bg = withAlpha(th.Pal.Accent, 0x33)
+		bg = WithAlpha(th.Pal.Accent, 0x33)
 		textColor = th.Pal.TextStrong
-		borderColor = withAlpha(th.Pal.Accent, 0x88)
+		borderColor = WithAlpha(th.Pal.Accent, 0x88)
 	}
 	return withBorder(gtx, borderColor, borders{Top: true, Right: true, Bottom: true, Left: true}, func(gtx layout.Context) layout.Dimensions {
 	return paintedBg(gtx, bg, func(gtx layout.Context) layout.Dimensions {
@@ -1155,6 +1155,10 @@ func toRichSpan(s slack.Span, th *Theme) richtext.SpanStyle {
 		out.Content = "● " + out.Content
 	case s.Style&slack.StyleMention != 0:
 		out.Color = th.Pal.Mention
+		out.Font.Weight = font.Bold
+	case s.Style&slack.StyleChannel != 0:
+		out.Color = th.Pal.Link
+		out.Font.Weight = font.Bold
 	}
 	return out
 }

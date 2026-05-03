@@ -1,0 +1,46 @@
+package slack
+
+import (
+	"reflect"
+	"testing"
+)
+
+func TestFormatSpans_Mentions(t *testing.T) {
+	f := NewFormatter(nil, "15:04")
+	tests := []struct {
+		input    string
+		expected []Span
+	}{
+		{
+			input: "Hello <@U123>!",
+			expected: []Span{
+				{Text: "Hello ", Style: 0},
+				{Text: "@U123", Style: StyleMention},
+				{Text: "!", Style: 0},
+			},
+		},
+		{
+			input: "Hey <!here>, look at this!",
+			expected: []Span{
+				{Text: "Hey ", Style: 0},
+				{Text: "@here", Style: StyleMention},
+				{Text: ", look at this!", Style: 0},
+			},
+		},
+		{
+			input: "Check <#C123|general>.",
+			expected: []Span{
+				{Text: "Check ", Style: 0},
+				{Text: "#general", Style: StyleChannel},
+				{Text: ".", Style: 0},
+			},
+		},
+	}
+
+	for _, tt := range tests {
+		got := f.FormatSpans(tt.input)
+		if !reflect.DeepEqual(got, tt.expected) {
+			t.Errorf("FormatSpans(%q) = %v, want %v", tt.input, got, tt.expected)
+		}
+	}
+}

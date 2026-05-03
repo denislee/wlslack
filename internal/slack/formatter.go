@@ -100,17 +100,13 @@ func (f *Formatter) Format(text string) string {
 func (f *Formatter) FormatSpans(text string) []Span {
 	// Resolve references that produce plain text first.
 	text = collapseBlankLines(text)
-	text = f.resolveUserMentions(text)
-	text = f.resolveGroupMentions(text)
-	text = f.resolveSpecialMentions(text)
-	text = f.resolveChannelLinks(text)
 	text = f.resolveEmoji(text)
 	text = f.resolveHTMLEntities(text)
 
 	// Now slice into styled spans. We do a single tokenized walk: each iteration
 	// finds the next styling marker and records the unstyled text before it,
 	// then the styled run.
-	return tokenize(text)
+	return f.tokenize(text)
 }
 
 func (f *Formatter) parseTimestamp(ts string) (time.Time, bool) {
@@ -364,7 +360,7 @@ func ExtractURLs(text string) []string {
 // It handles, in priority order: code blocks, inline code, <url|label> and
 // <url> link forms, bare http(s) URLs, *bold*, _italic_, ~strike~, and
 // environment / alert-status keyword highlights.
-func tokenize(text string) []Span {
+func (f *Formatter) tokenize(text string) []Span {
 	var out []Span
 	emit := func(s string, style StyleFlag, link string) {
 		if s == "" {
@@ -381,20 +377,20 @@ func tokenize(text string) []Span {
 			break
 		}
 		start, end := pos+m[0], pos+m[1]
-		appendInline(&out, text[pos:start])
+		f.appendInline(&out, text[pos:start])
 		body := reCodeBlock.FindStringSubmatch(text[start:end])
 		if len(body) >= 2 {
 			emit(body[1], StyleCodeBlock, "")
 		}
 		pos = end
 	}
-	appendInline(&out, text[pos:])
+	f.appendInline(&out, text[pos:])
 	return out
 }
 
 // appendInline tokenizes a text run that has no fenced code blocks, then
 // appends the resulting spans onto out.
-func appendInline(out *[]Span, text string) {
+func (f *Formatter) appendInline(out *[]Span, text string) {
 	if text == "" {
 		return
 	}
@@ -426,6 +422,47 @@ func appendInline(out *[]Span, text string) {
 			s, e := pos+m[0], pos+m[1]
 			content := text[pos+m[2] : pos+m[3]]
 			try(cand{s, e, func() { emit(content, StyleCode, "") }})
+		}
+		if m := reUserMention.FindStringSubmatchIndex(text[pos:]); m != nil {
+			s, e := pos+m[0], pos+m[1]
+			userID := text[pos+m[2] : pos+m[3]]
+			label := "@" + userID
+			if f.cache != nil {
+				if user := f.cache.GetUser(userID); user != nil {
+					name := user.DisplayName
+					if name == "" {
+						name = user.Name
+					}
+					label = "@" + name
+				}
+			}
+			try(cand{s, e, func() { emit(label, StyleMention, "") }})
+		}
+		if m := reSubteamLabel.FindStringSubmatchIndex(text[pos:]); m != nil {
+			s, e := pos+m[0], pos+m[1]
+			label := "@" + text[pos+m[4]:pos+m[5]]
+			try(cand{s, e, func() { emit(label, StyleMention, "") }})
+		}
+		if m := reSubteamNoLabel.FindStringSubmatchIndex(text[pos:]); m != nil {
+			s, e := pos+m[0], pos+m[1]
+			groupID := text[pos+m[2] : pos+m[3]]
+			label := "@" + groupID
+			if f.cache != nil {
+				if group := f.cache.GetUserGroup(groupID); group != nil {
+					label = "@" + group.Handle
+				}
+			}
+			try(cand{s, e, func() { emit(label, StyleMention, "") }})
+		}
+		if m := reSpecialMention.FindStringSubmatchIndex(text[pos:]); m != nil {
+			s, e := pos+m[0], pos+m[1]
+			label := "@" + text[pos+m[2]:pos+m[3]]
+			try(cand{s, e, func() { emit(label, StyleMention, "") }})
+		}
+		if m := reChannelLink.FindStringSubmatchIndex(text[pos:]); m != nil {
+			s, e := pos+m[0], pos+m[1]
+			label := "#" + text[pos+m[4]:pos+m[5]]
+			try(cand{s, e, func() { emit(label, StyleChannel, "") }})
 		}
 		if m := reURL.FindStringSubmatchIndex(text[pos:]); m != nil {
 			s, e := pos+m[0], pos+m[1]

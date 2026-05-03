@@ -44,6 +44,7 @@ type App struct {
 	switcher       *QuickSwitcher
 	linkPicker     *LinkPicker
 	imageViewer    *ImageViewer
+	messageEditor  *MessageEditor
 	reactionPicker *ReactionPicker
 	settings       *SettingsScreen
 
@@ -62,6 +63,7 @@ type App struct {
 	switcherOpen        bool
 	linkPickerOpen      bool
 	imageViewerOpen     bool
+	messageEditorOpen   bool
 	reactionPickerOpen  bool
 	settingsOpen        bool
 
@@ -81,6 +83,7 @@ type App struct {
 	pendFocusKeyTag         bool
 	pendFocusSwitcher       bool
 	pendFocusReactionPicker bool
+	pendFocusMessageEditor bool
 
 	// composerVisible toggles the bottom input row. The composer auto-hides
 	// when it loses focus and reappears when the user presses 'i'.
@@ -122,6 +125,7 @@ func Run(client *slack.Client, cfg *config.Config) error {
 	a.switcher = newQuickSwitcher(a.onSwitcherSelect)
 	a.linkPicker = newLinkPicker(a.onLinkPickerSelect)
 	a.imageViewer = newImageViewer(images)
+	a.messageEditor = newMessageEditor()
 	a.reactionPicker = newReactionPicker(images, a.onReactionPickerSelect)
 	a.reactionPicker.SetEmojis(a.fmt.EmojiCatalog())
 	a.settings = newSettingsScreen(a.th, a.onFontsChanged, a.closeSettings)
@@ -185,6 +189,9 @@ func (a *App) layout(gtx layout.Context) layout.Dimensions {
 			if a.imageViewerOpen {
 				return a.imageViewer.Layout(gtx, a.th)
 			}
+			if a.messageEditorOpen {
+				return a.messageEditor.Layout(gtx, a.th)
+			}
 			if a.reactionPickerOpen {
 				return a.reactionPicker.Layout(gtx, a.th)
 			}
@@ -245,6 +252,10 @@ func (a *App) applyPendingFocus(gtx layout.Context) {
 		gtx.Execute(key.FocusCmd{Tag: a.reactionPicker.Editor()})
 		a.pendFocusReactionPicker = false
 	}
+	if a.pendFocusMessageEditor {
+		a.messageEditor.Focus(gtx)
+		a.pendFocusMessageEditor = false
+	}
 }
 
 // handleKeys registers app-level shortcuts: Ctrl+K to open the switcher,
@@ -258,10 +269,19 @@ func (a *App) handleKeys(gtx layout.Context) {
 	switcherFocused := gtx.Source.Focused(switcherEditor)
 	reactionEditor := a.reactionPicker.Editor()
 	reactionFocused := gtx.Source.Focused(reactionEditor)
+	messageEditorFocused := gtx.Source.Focused(a.messageEditor.FocusTag())
 
 	filters := []event.Filter{
 		// Global jump-to shortcut.
 		key.Filter{Name: "K", Required: key.ModCtrl},
+	}
+	if a.messageEditorOpen {
+		meTag := a.messageEditor.FocusTag()
+		filters = append(filters,
+			key.Filter{Focus: meTag, Name: key.NameEscape},
+			key.Filter{Focus: meTag, Name: "[", Required: key.ModCtrl},
+		)
+		filters = append(filters, a.messageEditor.KeyFilters()...)
 	}
 	if a.switcherOpen {
 		filters = append(filters,
@@ -292,7 +312,7 @@ func (a *App) handleKeys(gtx layout.Context) {
 			key.Filter{Focus: &a.composer.editor, Name: "[", Required: key.ModCtrl},
 		)
 	}
-	if !composerFocused && !switcherFocused && !reactionFocused {
+	if !composerFocused && !switcherFocused && !reactionFocused && !messageEditorFocused && !a.messageEditorOpen {
 		// No Focus on these filters: any non-text-editing focus state (e.g. a
 		// channel-row Clickable that grabbed focus on click) still routes
 		// j/k/h/l/i here. Without this, clicking a row would silently disable
@@ -303,6 +323,7 @@ func (a *App) handleKeys(gtx layout.Context) {
 			key.Filter{Name: "I"},
 			key.Filter{Name: "H"},
 			key.Filter{Name: "L"},
+			key.Filter{Name: "E"},
 			key.Filter{Name: "D"},
 			key.Filter{Name: "Y"},
 			key.Filter{Name: "R", Optional: key.ModShift},
@@ -314,22 +335,22 @@ func (a *App) handleKeys(gtx layout.Context) {
 			key.Filter{Name: key.NameReturn},
 			key.Filter{Name: key.NameSpace},
 		)
-		if a.linkPickerOpen || a.imageViewerOpen {
-			filters = append(filters,
-				key.Filter{Name: key.NameEscape},
-				key.Filter{Name: "[", Required: key.ModCtrl},
-				key.Filter{Name: key.NameUpArrow},
-				key.Filter{Name: key.NameDownArrow},
-				key.Filter{Name: key.NameLeftArrow},
-				key.Filter{Name: key.NameRightArrow},
-			)
-		}
-		if a.settingsOpen {
-			filters = append(filters,
-				key.Filter{Name: key.NameEscape},
-				key.Filter{Name: "[", Required: key.ModCtrl},
-			)
-		}
+	}
+	if a.linkPickerOpen || a.imageViewerOpen {
+		filters = append(filters,
+			key.Filter{Name: key.NameEscape},
+			key.Filter{Name: "[", Required: key.ModCtrl},
+			key.Filter{Name: key.NameUpArrow},
+			key.Filter{Name: key.NameDownArrow},
+			key.Filter{Name: key.NameLeftArrow},
+			key.Filter{Name: key.NameRightArrow},
+		)
+	}
+	if a.settingsOpen {
+		filters = append(filters,
+			key.Filter{Name: key.NameEscape},
+			key.Filter{Name: "[", Required: key.ModCtrl},
+		)
 	}
 
 	for {
@@ -360,11 +381,19 @@ func (a *App) handleKeys(gtx layout.Context) {
 				a.closeLinkPicker()
 			case a.imageViewerOpen:
 				a.closeImageViewer()
+			case a.messageEditorOpen:
+				if !a.messageEditor.HandleEsc() {
+					a.closeMessageEditor()
+				}
 			case composerFocused:
 				a.pendFocusKeyTag = true
 				a.w.Invalidate()
 			case a.messages.AuthorOpen():
 				a.messages.CloseAuthor()
+				a.w.Invalidate()
+			}
+		case a.messageEditorOpen:
+			if a.messageEditor.HandleKey(gtx, kev) {
 				a.w.Invalidate()
 			}
 		case a.imageViewerOpen && (kev.Name == key.NameLeftArrow || kev.Name == key.NameUpArrow):
@@ -497,6 +526,10 @@ func (a *App) handleKeys(gtx layout.Context) {
 			default:
 				a.setFocusPane(paneMessages)
 			}
+		case kev.Name == "E":
+			if a.focusPane == paneMessages {
+				a.openMessageEditor()
+			}
 		case kev.Name == "Y":
 			if a.messages.AuthorOpen() {
 				if v, ok := a.messages.AuthorSelectedValue(); ok && v != "" {
@@ -600,6 +633,33 @@ func (a *App) openSelectedLinks() {
 
 func (a *App) closeImageViewer() {
 	a.imageViewerOpen = false
+	a.pendFocusKeyTag = true
+	a.w.Invalidate()
+}
+
+func (a *App) openMessageEditor() {
+	msg, _, ok := a.messages.SelectedMessage()
+	if !ok {
+		return
+	}
+	text := a.fmt.Format(msg.Text)
+	for _, f := range msg.Files {
+		if text != "" {
+			text += "\n"
+		}
+		text += f.PreferredImageURL()
+	}
+	if text == "" {
+		return
+	}
+	a.messageEditor.SetText(text)
+	a.messageEditorOpen = true
+	a.pendFocusMessageEditor = true
+	a.w.Invalidate()
+}
+
+func (a *App) closeMessageEditor() {
+	a.messageEditorOpen = false
 	a.pendFocusKeyTag = true
 	a.w.Invalidate()
 }

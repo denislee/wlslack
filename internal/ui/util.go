@@ -72,3 +72,9 @@ func withBorder(gtx layout.Context, c color.NRGBA, b borders, w layout.Widget) l
 	}
 	return dims
 }
+
+// WithAlpha returns a copy of c with its alpha component set to a.
+func WithAlpha(c color.NRGBA, a uint8) color.NRGBA {
+	c.A = a
+	return c
+}

@@ -1,7 +1,6 @@
 package ui
 
 import (
-	"image/color"
 	"strings"
 
 	"gioui.org/font"
@@ -53,7 +52,7 @@ func (c *Composer) Layout(gtx layout.Context, th *Theme, placeholder string, onS
 				ed := material.Editor(th.Mat, &c.editor, placeholder)
 				ed.Color = th.Pal.Text
 				ed.HintColor = th.Pal.TextMuted
-				ed.SelectionColor = withAlpha(th.Pal.Selection, 0x66)
+				ed.SelectionColor = WithAlpha(th.Pal.Selection, 0x66)
 				if th.Fonts.Composer.Face != "" {
 					ed.Font.Typeface = font.Typeface(th.Fonts.Composer.Face)
 				}
@@ -69,9 +68,4 @@ func (c *Composer) Layout(gtx layout.Context, th *Theme, placeholder string, onS
 // Focus puts the keyboard focus on the editor.
 func (c *Composer) Focus(gtx layout.Context) {
 	gtx.Execute(key.FocusCmd{Tag: &c.editor})
-}
-
-func withAlpha(c color.NRGBA, a uint8) color.NRGBA {
-	c.A = a
-	return c
 }
