@@ -20,11 +20,23 @@ type ChannelsSidebar struct {
 	activeID string
 	onSelect func(id string)
 
+	// cursorKey marks the keyboard-navigation cursor row. It can land on
+	// either a channel (key == channel ID) or a group header (key ==
+	// headerKey(name)), so j/k can step through headers and let space/enter
+	// collapse them. activeID still tracks which channel's messages are
+	// shown — the two diverge whenever the cursor sits on a header.
+	cursorKey string
+
 	// favorites is the set of channel IDs the user has starred. Updates flow
 	// through the host App via onFavoritesChanged so the new set can be
 	// persisted to disk.
 	favorites          map[string]bool
 	onFavoritesChanged func([]string)
+
+	// collapsed is the set of group header keys whose children are hidden.
+	// onCollapsedChanged fires on toggle so the host can persist the state.
+	collapsed          map[string]bool
+	onCollapsedChanged func([]string)
 
 	// raw retains the most recent unsorted channel set so we can re-group when
 	// favorites change without waiting for the next poll.
@@ -41,6 +53,8 @@ const (
 type sidebarRow struct {
 	kind       rowKind
 	header     string
+	headerKey  string
+	collapsed  bool
 	click      widget.Clickable
 	channel    slack.Channel
 	isFavorite bool
@@ -50,14 +64,18 @@ func newChannelsSidebar(onSelect func(id string)) *ChannelsSidebar {
 	cs := &ChannelsSidebar{
 		onSelect:  onSelect,
 		favorites: make(map[string]bool),
+		collapsed: make(map[string]bool),
 	}
 	cs.list.Axis = layout.Vertical
 	return cs
 }
 
-// SetActive marks the given channel ID as the highlighted one.
+// SetActive marks the given channel ID as the highlighted one. The cursor
+// follows the active channel so that subsequent j/k keeps stepping from
+// where the user is looking.
 func (s *ChannelsSidebar) SetActive(id string) {
 	s.activeID = id
+	s.cursorKey = id
 }
 
 // SetFavorites replaces the favorites set and registers a change callback.
@@ -73,6 +91,32 @@ func (s *ChannelsSidebar) SetFavorites(ids []string, onChanged func([]string)) {
 	if s.raw != nil {
 		s.rebuildRows()
 	}
+}
+
+// SetCollapsedGroups replaces the collapsed-group set and registers a change
+// callback. The callback fires whenever a header is clicked so the host can
+// persist the new list.
+func (s *ChannelsSidebar) SetCollapsedGroups(keys []string, onChanged func([]string)) {
+	set := make(map[string]bool, len(keys))
+	for _, k := range keys {
+		set[k] = true
+	}
+	s.collapsed = set
+	s.onCollapsedChanged = onChanged
+	if s.raw != nil {
+		s.rebuildRows()
+	}
+}
+
+func (s *ChannelsSidebar) collapsedSlice() []string {
+	out := make([]string, 0, len(s.collapsed))
+	for k, v := range s.collapsed {
+		if v {
+			out = append(out, k)
+		}
+	}
+	sort.Strings(out)
+	return out
 }
 
 // ToggleFavoriteOnActive flips the favorite state of the highlighted channel.
@@ -121,31 +165,46 @@ func (s *ChannelsSidebar) PageSize() int {
 	return 1
 }
 
-// MoveSelection shifts the highlighted row by delta (positive = down) and
-// returns the newly active channel ID. The list is scrolled so the new row
-// stays visible. Returns ("", false) when there are no rows yet. Header rows
-// are skipped over so navigation always lands on a real channel.
-func (s *ChannelsSidebar) MoveSelection(delta int) (string, bool) {
-	channelIdxs := make([]int, 0, len(s.rows))
-	for i, r := range s.rows {
-		if r.kind == rowChannel {
-			channelIdxs = append(channelIdxs, i)
-		}
+// rowKey returns the cursor key for r — channel ID for channel rows,
+// headerKey(name) for header rows. Used to track keyboard cursor position
+// stably across rebuilds.
+func rowKeyFor(r *sidebarRow) string {
+	if r.kind == rowHeader {
+		return headerKey(r.headerKey)
 	}
-	if len(channelIdxs) == 0 {
+	return r.channel.ID
+}
+
+// MoveSelection shifts the cursor by delta (positive = down) over both
+// channel and header rows. The list is scrolled so the new row stays
+// visible. Returns ("", false) when there are no rows yet, ("", true) when
+// the cursor lands on a header, and (channelID, true) when it lands on a
+// channel — callers should only switch the active channel in the third case.
+func (s *ChannelsSidebar) MoveSelection(delta int) (string, bool) {
+	if len(s.rows) == 0 {
 		return "", false
 	}
 
 	cur := -1
-	for ci, ri := range channelIdxs {
-		if s.rows[ri].channel.ID == s.activeID {
-			cur = ci
-			break
+	if s.cursorKey != "" {
+		for i, r := range s.rows {
+			if rowKeyFor(r) == s.cursorKey {
+				cur = i
+				break
+			}
+		}
+	}
+	if cur < 0 && s.activeID != "" {
+		for i, r := range s.rows {
+			if r.kind == rowChannel && r.channel.ID == s.activeID {
+				cur = i
+				break
+			}
 		}
 	}
 	if cur < 0 {
 		if delta < 0 {
-			cur = len(channelIdxs) - 1
+			cur = len(s.rows) - 1
 		} else {
 			cur = 0
 		}
@@ -155,30 +214,58 @@ func (s *ChannelsSidebar) MoveSelection(delta int) (string, bool) {
 	if cur < 0 {
 		cur = 0
 	}
-	if cur >= len(channelIdxs) {
-		cur = len(channelIdxs) - 1
+	if cur >= len(s.rows) {
+		cur = len(s.rows) - 1
 	}
-	idx := channelIdxs[cur]
-	s.activeID = s.rows[idx].channel.ID
+	r := s.rows[cur]
+	s.cursorKey = rowKeyFor(r)
 
 	// Keep the selection inside the visible window. Position.Count is the
 	// number of items the list rendered last frame; before the first layout
 	// it's 0, so just snap First to the new index in that case.
 	pos := &s.list.Position
 	if pos.Count <= 0 {
-		pos.First = idx
+		pos.First = cur
 		pos.Offset = 0
-	} else if idx < pos.First {
-		pos.First = idx
+	} else if cur < pos.First {
+		pos.First = cur
 		pos.Offset = 0
-	} else if idx >= pos.First+pos.Count {
-		pos.First = idx - pos.Count + 1
+	} else if cur >= pos.First+pos.Count {
+		pos.First = cur - pos.Count + 1
 		if pos.First < 0 {
 			pos.First = 0
 		}
 		pos.Offset = 0
 	}
-	return s.activeID, true
+	if r.kind == rowChannel {
+		s.activeID = r.channel.ID
+		return r.channel.ID, true
+	}
+	return "", true
+}
+
+// ToggleCursorHeader flips the collapsed state of the header row under the
+// cursor, if any. Returns true if a toggle happened so the caller can
+// invalidate the window.
+func (s *ChannelsSidebar) ToggleCursorHeader() bool {
+	if s.cursorKey == "" {
+		return false
+	}
+	for _, r := range s.rows {
+		if r.kind != rowHeader {
+			continue
+		}
+		if headerKey(r.headerKey) != s.cursorKey {
+			continue
+		}
+		s.collapsed[r.headerKey] = !s.collapsed[r.headerKey]
+		s.rebuildRows()
+		if s.onCollapsedChanged != nil {
+			s.onCollapsedChanged(s.collapsedSlice())
+		}
+		return true
+	}
+	return false
 }
 
 // SetChannels rebuilds the row list from the latest channel snapshot.
@@ -193,8 +280,11 @@ func (s *ChannelsSidebar) SetChannels(channels []slack.Channel) {
 func (s *ChannelsSidebar) rebuildRows() {
 	old := make(map[string]*sidebarRow, len(s.rows))
 	for _, r := range s.rows {
-		if r.kind == rowChannel {
+		switch r.kind {
+		case rowChannel:
 			old[r.channel.ID] = r
+		case rowHeader:
+			old[headerKey(r.headerKey)] = r
 		}
 	}
 
@@ -219,24 +309,29 @@ func (s *ChannelsSidebar) rebuildRows() {
 		}
 	}
 
-	byUnreadThenName := func(group []slack.Channel) {
+	// Most recent activity surfaces first within each group; channels with no
+	// known LatestTS fall to the bottom in stable name order.
+	byLatest := func(group []slack.Channel) {
 		sort.SliceStable(group, func(i, j int) bool {
 			ci, cj := group[i], group[j]
-			if (ci.UnreadCount > 0) != (cj.UnreadCount > 0) {
-				return ci.UnreadCount > 0
-			}
-			if ci.UnreadCount != cj.UnreadCount {
-				return ci.UnreadCount > cj.UnreadCount
+			if ci.LatestTS != cj.LatestTS {
+				if ci.LatestTS == "" {
+					return false
+				}
+				if cj.LatestTS == "" {
+					return true
+				}
+				return ci.LatestTS > cj.LatestTS
 			}
 			return ci.Name < cj.Name
 		})
 	}
-	sort.SliceStable(favs, func(i, j int) bool { return favs[i].Name < favs[j].Name })
-	byUnreadThenName(unread)
-	byUnreadThenName(channels)
-	byUnreadThenName(externals)
-	byUnreadThenName(dms)
-	byUnreadThenName(mpdms)
+	byLatest(favs)
+	byLatest(unread)
+	byLatest(channels)
+	byLatest(externals)
+	byLatest(dms)
+	byLatest(mpdms)
 
 	groups := []struct {
 		header string
@@ -256,7 +351,19 @@ func (s *ChannelsSidebar) rebuildRows() {
 		if len(g.items) == 0 {
 			continue
 		}
-		rows = append(rows, &sidebarRow{kind: rowHeader, header: g.header})
+		collapsed := s.collapsed[g.header]
+		hr, ok := old[headerKey(g.header)]
+		if !ok {
+			hr = &sidebarRow{kind: rowHeader}
+		}
+		hr.kind = rowHeader
+		hr.header = g.header
+		hr.headerKey = g.header
+		hr.collapsed = collapsed
+		rows = append(rows, hr)
+		if collapsed {
+			continue
+		}
 		for _, ch := range g.items {
 			r, ok := old[ch.ID]
 			if !ok {
@@ -271,18 +378,37 @@ func (s *ChannelsSidebar) rebuildRows() {
 	s.rows = rows
 }
 
+// headerKey distinguishes header rows from channel IDs in the old-row lookup
+// so a click state is preserved across rebuilds without colliding with a
+// channel that happens to share the header text.
+func headerKey(h string) string { return "__hdr:" + h }
+
 // Layout draws the sidebar.
 func (s *ChannelsSidebar) Layout(gtx layout.Context, th *Theme) layout.Dimensions {
 	// Process row clicks.
+	var toggleHeader string
 	for _, r := range s.rows {
-		if r.kind != rowChannel {
-			continue
-		}
-		if r.click.Clicked(gtx) {
-			s.activeID = r.channel.ID
-			if s.onSelect != nil {
-				s.onSelect(r.channel.ID)
+		switch r.kind {
+		case rowChannel:
+			if r.click.Clicked(gtx) {
+				s.activeID = r.channel.ID
+				s.cursorKey = r.channel.ID
+				if s.onSelect != nil {
+					s.onSelect(r.channel.ID)
+				}
 			}
+		case rowHeader:
+			if r.click.Clicked(gtx) {
+				toggleHeader = r.headerKey
+				s.cursorKey = headerKey(r.headerKey)
+			}
+		}
+	}
+	if toggleHeader != "" {
+		s.collapsed[toggleHeader] = !s.collapsed[toggleHeader]
+		s.rebuildRows()
+		if s.onCollapsedChanged != nil {
+			s.onCollapsedChanged(s.collapsedSlice())
 		}
 	}
 
@@ -290,24 +416,39 @@ func (s *ChannelsSidebar) Layout(gtx layout.Context, th *Theme) layout.Dimension
 		return material.List(th.Mat, &s.list).Layout(gtx, len(s.rows), func(gtx layout.Context, idx int) layout.Dimensions {
 			r := s.rows[idx]
 			if r.kind == rowHeader {
-				return s.layoutHeader(gtx, th, r.header)
+				return s.layoutHeader(gtx, th, r)
 			}
 			return s.layoutRow(gtx, th, r)
 		})
 	})
 }
 
-func (s *ChannelsSidebar) layoutHeader(gtx layout.Context, th *Theme, text string) layout.Dimensions {
-	return layout.Inset{
-		Top:    unit.Dp(8),
-		Bottom: unit.Dp(2),
-		Left:   unit.Dp(10),
-		Right:  unit.Dp(10),
-	}.Layout(gtx, func(gtx layout.Context) layout.Dimensions {
-		lbl := material.Caption(th.Mat, text)
-		lbl.Color = th.Pal.TextDim
-		lbl.Font.Weight = font.Bold
-		return lbl.Layout(gtx)
+func (s *ChannelsSidebar) layoutHeader(gtx layout.Context, th *Theme, r *sidebarRow) layout.Dimensions {
+	chevron := "▼ "
+	if r.collapsed {
+		chevron = "▶ "
+	}
+	selected := s.cursorKey == headerKey(r.headerKey)
+	bg := th.Pal.BgSidebar
+	color := th.Pal.TextDim
+	if selected {
+		bg = th.Pal.Accent
+		color = th.Pal.AccentText
+	}
+	return r.click.Layout(gtx, func(gtx layout.Context) layout.Dimensions {
+		return paintedBg(gtx, bg, func(gtx layout.Context) layout.Dimensions {
+			return layout.Inset{
+				Top:    unit.Dp(8),
+				Bottom: unit.Dp(2),
+				Left:   unit.Dp(10),
+				Right:  unit.Dp(10),
+			}.Layout(gtx, func(gtx layout.Context) layout.Dimensions {
+				lbl := material.Caption(th.Mat, chevron+r.header)
+				lbl.Color = color
+				lbl.Font.Weight = font.Bold
+				return lbl.Layout(gtx)
+			})
+		})
 	})
 }
 
@@ -320,6 +461,8 @@ func (s *ChannelsSidebar) layoutRow(gtx layout.Context, th *Theme, r *sidebarRow
 		textColor = th.Pal.AccentText
 	} else if r.channel.UnreadCount > 0 {
 		textColor = th.Pal.AccentText
+	} else if r.channel.LatestTS == "" {
+		textColor = th.Pal.TextDim
 	}
 
 	prefix := channelPrefix(r.channel)

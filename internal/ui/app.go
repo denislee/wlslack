@@ -110,6 +110,7 @@ func Run(client *slack.Client, cfg *config.Config) error {
 	a.channels = newChannelsSidebar(a.onChannelSelect)
 	state := config.LoadUIState()
 	a.channels.SetFavorites(state.Favorites, a.onFavoritesChanged)
+	a.channels.SetCollapsedGroups(state.CollapsedGroups, a.onCollapsedGroupsChanged)
 	a.messages = newMessagesView(images)
 	a.composer = newComposer()
 	a.switcher = newQuickSwitcher(a.onSwitcherSelect)
@@ -283,6 +284,7 @@ func (a *App) handleKeys(gtx layout.Context) {
 			key.Filter{Name: "F", Required: key.ModCtrl},
 			key.Filter{Name: "B", Required: key.ModCtrl},
 			key.Filter{Name: key.NameReturn},
+			key.Filter{Name: key.NameSpace},
 		)
 		if a.linkPickerOpen || a.imageViewerOpen {
 			filters = append(filters,
@@ -343,7 +345,11 @@ func (a *App) handleKeys(gtx layout.Context) {
 			a.w.Invalidate()
 		case a.linkPickerOpen && kev.Name == key.NameReturn:
 			a.linkPicker.Submit()
-		case kev.Name == key.NameReturn && a.focusPane == paneMessages:
+		case (kev.Name == key.NameReturn || kev.Name == key.NameSpace) && a.focusPane == paneChannels && !a.switcherOpen && !a.reactionPickerOpen && !a.linkPickerOpen && !a.imageViewerOpen:
+			if a.channels.ToggleCursorHeader() {
+				a.w.Invalidate()
+			}
+		case kev.Name == key.NameReturn && a.focusPane == paneMessages && !a.switcherOpen && !a.reactionPickerOpen:
 			a.openSelectedLinks()
 		case a.switcherOpen && (kev.Name == key.NameUpArrow || (kev.Name == "P" && kev.Modifiers.Contain(key.ModCtrl))):
 			a.switcher.MoveSelection(-1)
@@ -444,7 +450,11 @@ func (a *App) handleKeys(gtx layout.Context) {
 			gtx.Execute(key.FocusCmd{Tag: &a.composer.editor})
 			a.w.Invalidate()
 		case kev.Name == "Q":
-			os.Exit(0)
+			if a.imageViewerOpen {
+				a.closeImageViewer()
+			} else {
+				os.Exit(0)
+			}
 		}
 	}
 }
@@ -480,7 +490,7 @@ func (a *App) openSelectedLinks() {
 	switch len(urls) {
 	case 0:
 		images := a.messages.SelectedMessageImages()
-		if len(images) > 1 {
+		if len(images) >= 1 {
 			a.imageViewer.SetFiles(images)
 			a.imageViewerOpen = true
 			a.w.Invalidate()
@@ -633,6 +643,12 @@ func (a *App) onFavoritesChanged(ids []string) {
 	config.SaveUIState(state)
 }
 
+func (a *App) onCollapsedGroupsChanged(keys []string) {
+	state := config.LoadUIState()
+	state.CollapsedGroups = keys
+	config.SaveUIState(state)
+}
+
 // moveInPane dispatches j/k to whichever pane has logical focus. The author
 // panel takes priority — when it's open, j/k walks the field list rather than
 // the underlying message rows.
@@ -650,7 +666,11 @@ func (a *App) moveInPane(delta int) {
 		}
 	default:
 		if id, ok := a.channels.MoveSelection(delta); ok {
-			a.onChannelSelect(id)
+			if id != "" {
+				a.onChannelSelect(id)
+			} else {
+				a.w.Invalidate()
+			}
 		}
 	}
 }
@@ -666,7 +686,11 @@ func (a *App) pageInPane(dir int) {
 	default:
 		delta := a.channels.PageSize() * dir
 		if id, ok := a.channels.MoveSelection(delta); ok {
-			a.onChannelSelect(id)
+			if id != "" {
+				a.onChannelSelect(id)
+			} else {
+				a.w.Invalidate()
+			}
 		}
 	}
 }

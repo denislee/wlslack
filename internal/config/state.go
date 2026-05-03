@@ -7,18 +7,20 @@ import (
 )
 
 type UIState struct {
-	SidebarVisible bool              `json:"sidebar_visible"`
-	UnreadOnly     bool              `json:"unread_only"`
-	Favorites      []string          `json:"favorites"`
-	ReadTimestamps map[string]string `json:"read_timestamps"`
+	SidebarVisible  bool              `json:"sidebar_visible"`
+	UnreadOnly      bool              `json:"unread_only"`
+	Favorites       []string          `json:"favorites"`
+	CollapsedGroups []string          `json:"collapsed_groups"`
+	ReadTimestamps  map[string]string `json:"read_timestamps"`
 }
 
 func DefaultUIState() UIState {
 	return UIState{
-		SidebarVisible: false,
-		UnreadOnly:     true,
-		Favorites:      []string{},
-		ReadTimestamps: make(map[string]string),
+		SidebarVisible:  false,
+		UnreadOnly:      true,
+		Favorites:       []string{},
+		CollapsedGroups: []string{},
+		ReadTimestamps:  make(map[string]string),
 	}
 }
 

@@ -552,7 +552,7 @@ func (m *MessagesView) layoutAuthor(gtx layout.Context, th *Theme) layout.Dimens
 // name above the field list. The avatar is requested from the same async
 // loader used for inline message images, so it pops in after the first frame.
 func (m *MessagesView) layoutAuthorHeader(gtx layout.Context, th *Theme) layout.Dimensions {
-	const avatarDp = 56
+	const avatarDp = 96
 	avatarOp, hasAvatar := m.authorAvatarOp(gtx)
 	return layout.Flex{Axis: layout.Vertical, Alignment: layout.Middle}.Layout(gtx,
 		layout.Rigid(func(gtx layout.Context) layout.Dimensions {
@@ -769,25 +769,34 @@ func (m *MessagesView) layoutFiles(gtx layout.Context, th *Theme, files []slack.
 	if len(files) == 0 || m.images == nil {
 		return layout.Dimensions{}
 	}
-	const maxW, maxH = 320, 240 // dp; thumbnail-sized preview cap
-	children := make([]layout.FlexChild, 0, len(files))
+	const maxW, maxH = 200, 200 // dp; thumbnail-sized preview cap
+	children := make([]layout.FlexChild, 0, len(files)*2)
+	first := true
 	for _, f := range files {
 		f := f
 		if !f.IsImage() {
+			if !first {
+				children = append(children, layout.Rigid(layout.Spacer{Width: unit.Dp(6)}.Layout))
+			}
+			first = false
 			children = append(children, layout.Rigid(func(gtx layout.Context) layout.Dimensions {
 				lbl := material.Caption(th.Mat, "📎 "+f.Name)
 				lbl.Color = th.Pal.TextDim
-				return layout.Inset{Top: unit.Dp(2)}.Layout(gtx, lbl.Layout)
+				return lbl.Layout(gtx)
 			}))
 			continue
 		}
+		if !first {
+			children = append(children, layout.Rigid(layout.Spacer{Width: unit.Dp(6)}.Layout))
+		}
+		first = false
 		children = append(children, layout.Rigid(func(gtx layout.Context) layout.Dimensions {
-			return layout.Inset{Top: unit.Dp(4)}.Layout(gtx, func(gtx layout.Context) layout.Dimensions {
-				return m.layoutImage(gtx, th, f, maxW, maxH)
-			})
+			return m.layoutImage(gtx, th, f, maxW, maxH)
 		}))
 	}
-	return layout.Flex{Axis: layout.Vertical}.Layout(gtx, children...)
+	return layout.Inset{Top: unit.Dp(4)}.Layout(gtx, func(gtx layout.Context) layout.Dimensions {
+		return layout.Flex{Axis: layout.Horizontal, Alignment: layout.Start}.Layout(gtx, children...)
+	})
 }
 
 func (m *MessagesView) layoutImage(gtx layout.Context, th *Theme, f slack.File, maxW, maxH int) layout.Dimensions {
