@@ -62,6 +62,8 @@ func initSchema(db *sql.DB) error {
 			username TEXT,
 			body TEXT,
 			reply_count INTEGER NOT NULL DEFAULT 0,
+			reply_users TEXT,
+			last_reply_ts TEXT,
 			reactions TEXT,
 			edited INTEGER NOT NULL DEFAULT 0,
 			edited_ts TEXT,
@@ -83,6 +85,8 @@ func initSchema(db *sql.DB) error {
 	// swallow that since CREATE TABLE IF NOT EXISTS won't add it for us.
 	migrations := []string{
 		`ALTER TABLE channels ADD COLUMN is_external INTEGER NOT NULL DEFAULT 0`,
+		`ALTER TABLE messages ADD COLUMN reply_users TEXT`,
+		`ALTER TABLE messages ADD COLUMN last_reply_ts TEXT`,
 	}
 	for _, m := range migrations {
 		if _, err := db.Exec(m); err != nil && !strings.Contains(err.Error(), "duplicate column") {
@@ -190,8 +194,8 @@ func (s *sqliteStore) updateChannelUnread(id string, unread int, lastRead, lates
 // retained. Returned messages are ordered ascending by ts.
 func (s *sqliteStore) loadMessages(channelID, threadTS string, since int64) ([]Message, error) {
 	rows, err := s.db.Query(`
-		SELECT ts, user_id, username, body, reply_count, reactions,
-		       edited, edited_ts, edit_history, files, is_bot
+		SELECT ts, user_id, username, body, reply_count, reply_users, last_reply_ts,
+		       reactions, edited, edited_ts, edit_history, files, is_bot
 		FROM messages
 		WHERE channel_id = ? AND thread_ts = ? AND ts_unix >= ?
 		ORDER BY ts ASC`,
@@ -204,20 +208,24 @@ func (s *sqliteStore) loadMessages(channelID, threadTS string, since int64) ([]M
 	var out []Message
 	for rows.Next() {
 		var m Message
-		var userID, username, body, reactions, editedTS, history, files sql.NullString
+		var userID, username, body, replyUsers, lastReply, reactions, editedTS, history, files sql.NullString
 		var edited, isBot int
 		if err := rows.Scan(&m.Timestamp, &userID, &username, &body, &m.ReplyCount,
-			&reactions, &edited, &editedTS, &history, &files, &isBot); err != nil {
+			&replyUsers, &lastReply, &reactions, &edited, &editedTS, &history, &files, &isBot); err != nil {
 			return nil, err
 		}
 		m.UserID = userID.String
 		m.Username = username.String
 		m.Text = body.String
+		m.LastReplyTS = lastReply.String
 		m.Edited = edited != 0
 		m.EditedTS = editedTS.String
 		m.IsBot = isBot != 0
 		if threadTS != "" {
 			m.ThreadTS = threadTS
+		}
+		if replyUsers.Valid && replyUsers.String != "" {
+			_ = json.Unmarshal([]byte(replyUsers.String), &m.ReplyUsers)
 		}
 		if reactions.Valid && reactions.String != "" {
 			_ = json.Unmarshal([]byte(reactions.String), &m.Reactions)
@@ -245,14 +253,16 @@ func (s *sqliteStore) saveMessages(channelID, threadTS string, msgs []Message) e
 
 	stmt, err := tx.Prepare(`
 		INSERT INTO messages (channel_id, thread_ts, ts, ts_unix, user_id, username,
-		                     body, reply_count, reactions, edited, edited_ts,
-		                     edit_history, files, is_bot)
-		VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+		                     body, reply_count, reply_users, last_reply_ts,
+		                     reactions, edited, edited_ts, edit_history, files, is_bot)
+		VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
 		ON CONFLICT(channel_id, thread_ts, ts) DO UPDATE SET
 			user_id=excluded.user_id,
 			username=excluded.username,
 			body=excluded.body,
 			reply_count=excluded.reply_count,
+			reply_users=excluded.reply_users,
+			last_reply_ts=excluded.last_reply_ts,
 			reactions=excluded.reactions,
 			edited=excluded.edited,
 			edited_ts=excluded.edited_ts,
@@ -265,12 +275,13 @@ func (s *sqliteStore) saveMessages(channelID, threadTS string, msgs []Message) e
 	defer stmt.Close()
 
 	for _, m := range msgs {
+		replyUsers, _ := json.Marshal(m.ReplyUsers)
 		reactions, _ := json.Marshal(m.Reactions)
 		history, _ := json.Marshal(m.EditHistory)
 		files, _ := json.Marshal(m.Files)
 		if _, err := stmt.Exec(channelID, threadTS, m.Timestamp, slackTSToUnix(m.Timestamp),
-			m.UserID, m.Username, m.Text, m.ReplyCount, string(reactions),
-			boolToInt(m.Edited), m.EditedTS, string(history), string(files),
+			m.UserID, m.Username, m.Text, m.ReplyCount, string(replyUsers), m.LastReplyTS,
+			string(reactions), boolToInt(m.Edited), m.EditedTS, string(history), string(files),
 			boolToInt(m.IsBot)); err != nil {
 			return err
 		}

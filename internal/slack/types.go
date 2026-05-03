@@ -23,6 +23,8 @@ type Message struct {
 	Text        string
 	ThreadTS    string
 	ReplyCount  int
+	ReplyUsers  []string // IDs of users who replied
+	LastReplyTS string   // Timestamp of the last reply
 	Reactions   []Reaction
 	Edited      bool
 	EditedTS    string

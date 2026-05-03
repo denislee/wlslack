@@ -872,6 +872,8 @@ func (c *Client) convertMessage(msg slackapi.Message) Message {
 		Text:        text,
 		ThreadTS:    msg.ThreadTimestamp,
 		ReplyCount:  msg.ReplyCount,
+		ReplyUsers:  msg.ReplyUsers,
+		LastReplyTS: msg.LatestReply,
 		Reactions:   reactions,
 		Edited:      msg.Edited != nil,
 		EditedTS:    editedTS,

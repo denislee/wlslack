@@ -303,6 +303,7 @@ func (a *App) handleKeys(gtx layout.Context) {
 			key.Filter{Name: "I"},
 			key.Filter{Name: "H"},
 			key.Filter{Name: "L"},
+			key.Filter{Name: "D"},
 			key.Filter{Name: "Y"},
 			key.Filter{Name: "R", Optional: key.ModShift},
 			key.Filter{Name: "Q"},
@@ -392,7 +393,7 @@ func (a *App) handleKeys(gtx layout.Context) {
 					if a.messages.InThread() {
 						ch, _ = a.messages.ThreadInfo()
 					}
-					a.client.DeleteMessage(ch, ts)
+					a.deleteMessage(ch, ts)
 					a.messages.SetDeletePendingTS("")
 					a.w.Invalidate()
 					continue
@@ -408,7 +409,7 @@ func (a *App) handleKeys(gtx layout.Context) {
 						if a.messages.InThread() {
 							ch, _ = a.messages.ThreadInfo()
 						}
-						a.client.DeleteMessage(ch, ts)
+						a.deleteMessage(ch, ts)
 						a.messages.SetDeletePendingTS("")
 					} else {
 						a.messages.SetDeletePendingTS(ts)
@@ -726,6 +727,25 @@ func (a *App) refreshAfterReaction(chID, ts string) {
 		a.w.Invalidate()
 	}
 	_ = ts
+}
+
+func (a *App) deleteMessage(ch, ts string) {
+	go func() {
+		if err := a.client.DeleteMessage(ch, ts); err != nil {
+			slog.Error("DeleteMessage failed", "channel", ch, "ts", ts, "error", err)
+			return
+		}
+		if a.messages.InThread() {
+			tCh, tTS := a.messages.ThreadInfo()
+			if tCh == ch {
+				a.fetchThread(ch, tTS)
+			}
+		}
+		if a.getActiveID() == ch {
+			a.fetchMessages(ch)
+		}
+		a.w.Invalidate()
+	}()
 }
 
 // openURL hands a URL to the system browser via xdg-open. Errors are logged

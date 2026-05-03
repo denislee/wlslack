@@ -786,14 +786,6 @@ func (m *MessagesView) layoutRow(gtx layout.Context, th *Theme, fmt *slack.Forma
 					layout.Rigid(func(gtx layout.Context) layout.Dimensions {
 						return m.layoutBody(gtx, th, fmt, r)
 					}),
-					// Thread indicator (only on the channel-history view; inside a
-					// thread every row is by definition part of one).
-					layout.Rigid(func(gtx layout.Context) layout.Dimensions {
-						if m.threadActive || r.msg.ReplyCount <= 0 {
-							return layout.Dimensions{}
-						}
-						return m.layoutThreadBadge(gtx, th, r.msg.ReplyCount)
-					}),
 					// Inline image previews
 					layout.Rigid(func(gtx layout.Context) layout.Dimensions {
 						return m.layoutFiles(gtx, th, r.msg.Files)
@@ -806,6 +798,14 @@ func (m *MessagesView) layoutRow(gtx layout.Context, th *Theme, fmt *slack.Forma
 						return layout.Inset{Top: unit.Dp(2)}.Layout(gtx, func(gtx layout.Context) layout.Dimensions {
 							return m.layoutReactions(gtx, th, fmt, r.msg.Reactions)
 						})
+					}),
+					// Thread indicator (only on the channel-history view; inside a
+					// thread every row is by definition part of one).
+					layout.Rigid(func(gtx layout.Context) layout.Dimensions {
+						if m.threadActive || r.msg.ReplyCount <= 0 {
+							return layout.Dimensions{}
+						}
+						return m.layoutThreadBadge(gtx, th, fmt, &r.msg)
 					}),
 					// Deletion pending prompt
 					layout.Rigid(func(gtx layout.Context) layout.Dimensions {
@@ -961,19 +961,71 @@ func (m *MessagesView) layoutImage(gtx layout.Context, th *Theme, f slack.File, 
 	return w.Layout(gtx)
 }
 
-// layoutThreadBadge renders a "💬 N replies" caption pinned under the message
-// body so threads are visible in the channel history without drilling in.
-func (m *MessagesView) layoutThreadBadge(gtx layout.Context, th *Theme, count int) layout.Dimensions {
+// layoutThreadBadge renders a caption with participant avatars, reply count,
+// and last reply age pinned under the message body.
+func (m *MessagesView) layoutThreadBadge(gtx layout.Context, th *Theme, fm *slack.Formatter, msg *slack.Message) layout.Dimensions {
 	noun := "replies"
-	if count == 1 {
+	if msg.ReplyCount == 1 {
 		noun = "reply"
 	}
+
+	age := ""
+	if msg.LastReplyTS != "" {
+		age = fm.FormatTimestampAge(msg.LastReplyTS)
+	}
+
 	return layout.Inset{Top: unit.Dp(4)}.Layout(gtx, func(gtx layout.Context) layout.Dimensions {
-		lbl := material.Body2(th.Mat, fmt.Sprintf("💬 %d %s", count, noun))
-		lbl.Color = th.Pal.Accent
-		lbl.Font.Weight = font.Bold
-		th.applyFont(&lbl, th.Fonts.Threads)
-		return lbl.Layout(gtx)
+		return layout.Flex{Alignment: layout.Middle}.Layout(gtx,
+			layout.Rigid(func(gtx layout.Context) layout.Dimensions {
+				if len(msg.ReplyUsers) == 0 {
+					return layout.Dimensions{}
+				}
+
+				var children []layout.FlexChild
+				for i, userID := range msg.ReplyUsers {
+					if i >= 5 {
+						break
+					}
+					userID := userID
+					children = append(children, layout.Rigid(func(gtx layout.Context) layout.Dimensions {
+						u := fm.GetUser(userID)
+						var op paint.ImageOp
+						var hasOp bool
+						if u != nil && u.ImageURL != "" {
+							op, hasOp, _ = m.images.GetOp(u.ImageURL)
+						}
+
+						size := unit.Dp(16)
+						return layout.Inset{Right: unit.Dp(2)}.Layout(gtx, func(gtx layout.Context) layout.Dimensions {
+							if !hasOp {
+								return layout.Spacer{Width: size, Height: size}.Layout(gtx)
+							}
+							gtx.Constraints.Max = image.Pt(gtx.Dp(size), gtx.Dp(size))
+							gtx.Constraints.Min = gtx.Constraints.Max
+							w := widget.Image{
+								Src:      op,
+								Fit:      widget.Cover,
+								Position: layout.Center,
+							}
+							return w.Layout(gtx)
+						})
+					}))
+				}
+				return layout.Flex{Axis: layout.Horizontal}.Layout(gtx, children...)
+			}),
+			layout.Rigid(layout.Spacer{Width: unit.Dp(4)}.Layout),
+			layout.Rigid(func(gtx layout.Context) layout.Dimensions {
+				text := fmt.Sprintf("%d %s", msg.ReplyCount, noun)
+				if age != "" {
+					text += " • last " + age
+				}
+				lbl := material.Body2(th.Mat, text)
+				lbl.Color = th.Pal.Accent
+				lbl.Font.Weight = font.Bold
+				th.applyFont(&lbl, th.Fonts.Threads)
+				return lbl.Layout(gtx)
+			}),
+		)
 	})
 }
 
