@@ -1,0 +1,960 @@
+package ui
+
+import (
+	"fmt"
+	"image"
+	"image/color"
+
+	"gioui.org/font"
+	"gioui.org/layout"
+	"gioui.org/op/paint"
+	"gioui.org/text"
+	"gioui.org/unit"
+	"gioui.org/widget"
+	"gioui.org/widget/material"
+	"gioui.org/x/richtext"
+
+	"github.com/user/wlslack/internal/slack"
+)
+
+// MessagesView renders the message list for the active channel.
+type MessagesView struct {
+	list     widget.List
+	rows     []*messageRow
+	header   string
+	topic    string
+	selected int  // index of the keyboard-highlighted row, or -1 for none
+	focused  bool // true when the messages pane is the j/k target
+
+	// pendFocusLast is set by FocusLast() when the row set is empty, so that
+	// the next SetMessages call lands selection on the freshly-loaded last
+	// row. The Ctrl+K switcher uses this to drop the user at the latest
+	// message of the channel they just jumped to.
+	pendFocusLast bool
+
+	// Thread mode: when active, the pane shows the parent message plus its
+	// replies instead of the channel history. j/k and selection operate on
+	// the thread list while threadActive is true.
+	threadActive   bool
+	threadChannel  string
+	threadTS       string
+	threadList     widget.List
+	threadRows     []*messageRow
+	threadSelected int
+
+	// Author detail panel: opened with 'l' on a selected thread message,
+	// shows the author's profile fields. j/k walk the field list, 'y'
+	// copies the highlighted value to the clipboard.
+	authorOpen     bool
+	authorRows     []authorField
+	authorSelected int
+	authorAvatar   string // image URL for the panel header, "" when missing
+	authorName     string // display name shown next to the avatar
+
+	images *slack.ImageLoader
+}
+
+type authorField struct {
+	Label string
+	Value string
+}
+
+type messageRow struct {
+	msg     slack.Message
+	rich    richtext.InteractiveText
+}
+
+func newMessagesView(images *slack.ImageLoader) *MessagesView {
+	mv := &MessagesView{images: images, selected: -1, threadSelected: -1}
+	mv.list.Axis = layout.Vertical
+	mv.list.ScrollToEnd = true
+	mv.threadList.Axis = layout.Vertical
+	mv.threadList.ScrollToEnd = true
+	return mv
+}
+
+// SetFocused toggles the visual highlight on the selected row. Called by the
+// app when 'l'/'h' move focus between the sidebar and the messages pane.
+func (m *MessagesView) SetFocused(f bool) { m.focused = f }
+
+// Reset clears selection and re-enables tail-following. Called on channel
+// switch so we land at the latest message and don't carry highlight state
+// across conversations.
+func (m *MessagesView) Reset() {
+	m.selected = -1
+	m.list.ScrollToEnd = true
+	m.list.Position.BeforeEnd = false
+	m.pendFocusLast = false
+	m.threadActive = false
+	m.threadChannel = ""
+	m.threadTS = ""
+	m.threadRows = nil
+	m.threadSelected = -1
+}
+
+// FocusLast lands selection on the most recent message in the channel-history
+// list. If there are no rows yet (cache miss before the API call returns),
+// the request is queued so the next SetMessages applies it.
+func (m *MessagesView) FocusLast() {
+	if m.threadActive {
+		return
+	}
+	if len(m.rows) == 0 {
+		m.pendFocusLast = true
+		return
+	}
+	m.selected = len(m.rows) - 1
+	pos := &m.list.Position
+	pos.First = m.selected
+	pos.Offset = 0
+	m.list.ScrollToEnd = true
+}
+
+// PageSize returns the number of fully visible items minus one for overlap.
+func (m *MessagesView) PageSize() int {
+	pos := m.list.Position
+	if m.threadActive {
+		pos = m.threadList.Position
+	}
+	if pos.Count > 1 {
+		return pos.Count - 1
+	}
+	return 1
+}
+
+// HasSelection reports whether the channel-history list (not the thread list)
+// has a highlighted row that 'l' can drill into.
+func (m *MessagesView) HasSelection() bool {
+	return !m.threadActive && m.selected >= 0 && m.selected < len(m.rows)
+}
+
+// SelectedMessageURLs returns the links found on whichever message currently
+// has the keyboard highlight (thread row when in thread mode, otherwise the
+// channel-history row). Returns nil when nothing is selected. File URLs are
+// excluded — they need Slack auth and don't open in an external browser.
+func (m *MessagesView) SelectedMessageURLs() []string {
+	msg := m.selectedMessage()
+	if msg == nil {
+		return nil
+	}
+	return slack.ExtractURLs(msg.Text)
+}
+
+// SelectedMessageImages returns the image attachments of the highlighted
+// message in the order Slack delivered them. Used by the in-app image viewer
+// when the user presses Enter on a message that has no links.
+func (m *MessagesView) SelectedMessageImages() []slack.File {
+	msg := m.selectedMessage()
+	if msg == nil {
+		return nil
+	}
+	out := make([]slack.File, 0, len(msg.Files))
+	for _, f := range msg.Files {
+		if f.IsImage() {
+			out = append(out, f)
+		}
+	}
+	return out
+}
+
+// SelectedMessage returns the highlighted message (thread row when in thread
+// mode, otherwise the channel-history row) plus its timestamp. ok is false
+// when nothing is selected.
+func (m *MessagesView) SelectedMessage() (slack.Message, string, bool) {
+	msg := m.selectedMessage()
+	if msg == nil {
+		return slack.Message{}, "", false
+	}
+	return *msg, msg.Timestamp, true
+}
+
+func (m *MessagesView) selectedMessage() *slack.Message {
+	switch {
+	case m.threadActive:
+		if m.threadSelected >= 0 && m.threadSelected < len(m.threadRows) {
+			return &m.threadRows[m.threadSelected].msg
+		}
+	default:
+		if m.selected >= 0 && m.selected < len(m.rows) {
+			return &m.rows[m.selected].msg
+		}
+	}
+	return nil
+}
+
+// InThread reports whether the pane is currently displaying a thread.
+func (m *MessagesView) InThread() bool { return m.threadActive }
+
+// ThreadInfo returns the channel ID and parent timestamp of the open thread.
+func (m *MessagesView) ThreadInfo() (string, string) { return m.threadChannel, m.threadTS }
+
+// OpenThread enters thread mode for the currently selected message and
+// returns the channel/thread timestamp the caller should fetch. When the
+// selected row is itself a reply, the thread root (ThreadTS) is used so we
+// always render the full conversation, not just the tail.
+func (m *MessagesView) OpenThread(channelID string) (string, string, bool) {
+	if !m.HasSelection() || channelID == "" {
+		return "", "", false
+	}
+	r := m.rows[m.selected]
+	ts := r.msg.ThreadTS
+	if ts == "" {
+		ts = r.msg.Timestamp
+	}
+	m.threadActive = true
+	m.threadChannel = channelID
+	m.threadTS = ts
+	// Seed with the selected message so the parent is visible immediately,
+	// before GetThreadReplies returns. SetThreadMessages will replace this
+	// with the authoritative parent + reply set on the next frame.
+	m.threadRows = []*messageRow{{msg: r.msg}}
+	// Land highlight on the parent message so the user has an immediate
+	// keyboard target. SetThreadMessages preserves this selection by ts when
+	// the API result arrives.
+	m.threadSelected = 0
+	// Land at the top so the parent message — the one the user just drilled
+	// into — is the first thing they see, with replies trailing below.
+	m.threadList.ScrollToEnd = false
+	m.threadList.Position = layout.Position{}
+	return channelID, ts, true
+}
+
+// CloseThread exits thread mode and returns to the channel history view.
+// Returns false if the pane wasn't in thread mode to begin with. Also
+// dismisses the author panel since it's a child of the thread view.
+func (m *MessagesView) CloseThread() bool {
+	if !m.threadActive {
+		return false
+	}
+	m.threadActive = false
+	m.threadChannel = ""
+	m.threadTS = ""
+	m.threadRows = nil
+	m.threadSelected = -1
+	m.authorOpen = false
+	m.authorRows = nil
+	m.authorSelected = 0
+	return true
+}
+
+// HasThreadSelection reports whether the thread list has a highlighted row
+// — used by the app to decide whether 'l' should drill into the author panel.
+func (m *MessagesView) HasThreadSelection() bool {
+	return m.threadActive && m.threadSelected >= 0 && m.threadSelected < len(m.threadRows)
+}
+
+// AuthorOpen reports whether the author detail panel is visible.
+func (m *MessagesView) AuthorOpen() bool { return m.authorOpen }
+
+// OpenAuthor populates and shows the author panel for the currently selected
+// thread message. fm is consulted for the cached profile; missing profile data
+// just yields a panel with whatever IDs we have on the message itself.
+func (m *MessagesView) OpenAuthor(fm *slack.Formatter) bool {
+	if !m.HasThreadSelection() {
+		return false
+	}
+	r := m.threadRows[m.threadSelected]
+	candidates := []authorField{{"User ID", r.msg.UserID}}
+	avatar, displayName := "", r.msg.Username
+	if u := fm.GetUser(r.msg.UserID); u != nil {
+		candidates = []authorField{
+			{"User ID", u.ID},
+			{"Username", u.Name},
+			{"Display name", u.DisplayName},
+			{"Real name", u.RealName},
+			{"Title", u.Title},
+			{"Email", u.Email},
+			{"Phone", u.Phone},
+			{"Timezone", u.Timezone},
+			{"Presence", u.Presence},
+			{"Status emoji", u.StatusEmoji},
+			{"Status text", u.StatusText},
+			{"Image URL", u.ImageURL},
+		}
+		avatar = u.ImageURL
+		switch {
+		case u.DisplayName != "":
+			displayName = u.DisplayName
+		case u.RealName != "":
+			displayName = u.RealName
+		case u.Name != "":
+			displayName = u.Name
+		}
+	}
+	out := candidates[:0]
+	for _, f := range candidates {
+		if f.Value != "" {
+			out = append(out, f)
+		}
+	}
+	if len(out) == 0 {
+		out = []authorField{{"User ID", r.msg.UserID}}
+	}
+	m.authorRows = out
+	m.authorSelected = 0
+	m.authorOpen = true
+	m.authorAvatar = avatar
+	m.authorName = displayName
+	return true
+}
+
+// CloseAuthor hides the author panel. Returns false when it wasn't open.
+func (m *MessagesView) CloseAuthor() bool {
+	if !m.authorOpen {
+		return false
+	}
+	m.authorOpen = false
+	m.authorRows = nil
+	m.authorSelected = 0
+	m.authorAvatar = ""
+	m.authorName = ""
+	return true
+}
+
+// MoveAuthorSelection shifts the highlighted field by delta, clamping at the
+// ends. Returns false when the selection didn't change.
+func (m *MessagesView) MoveAuthorSelection(delta int) bool {
+	if !m.authorOpen || len(m.authorRows) == 0 {
+		return false
+	}
+	idx := m.authorSelected + delta
+	if idx < 0 {
+		idx = 0
+	}
+	if idx >= len(m.authorRows) {
+		idx = len(m.authorRows) - 1
+	}
+	if idx == m.authorSelected {
+		return false
+	}
+	m.authorSelected = idx
+	return true
+}
+
+// AuthorSelectedValue returns the value of the highlighted field, used by 'y'
+// to copy to the clipboard.
+func (m *MessagesView) AuthorSelectedValue() (string, bool) {
+	if !m.authorOpen || m.authorSelected < 0 || m.authorSelected >= len(m.authorRows) {
+		return "", false
+	}
+	return m.authorRows[m.authorSelected].Value, true
+}
+
+// SetThreadMessages replaces the thread row set. The slack API returns the
+// parent first followed by replies — we render the whole sequence so the
+// reader sees the original message above the conversation.
+func (m *MessagesView) SetThreadMessages(msgs []slack.Message) {
+	if !m.threadActive {
+		return
+	}
+	old := make(map[string]*messageRow, len(m.threadRows))
+	for _, r := range m.threadRows {
+		old[r.msg.Timestamp] = r
+	}
+	var selectedTS string
+	if m.threadSelected >= 0 && m.threadSelected < len(m.threadRows) {
+		selectedTS = m.threadRows[m.threadSelected].msg.Timestamp
+	}
+	out := make([]*messageRow, 0, len(msgs))
+	for _, msg := range msgs {
+		r, ok := old[msg.Timestamp]
+		if !ok {
+			r = &messageRow{}
+		}
+		r.msg = msg
+		out = append(out, r)
+	}
+	m.threadRows = out
+	m.threadSelected = -1
+	if selectedTS != "" {
+		for i, r := range out {
+			if r.msg.Timestamp == selectedTS {
+				m.threadSelected = i
+				break
+			}
+		}
+	}
+}
+
+// MoveSelection shifts the selection by delta and scrolls the active list to
+// keep the new row visible. Returns false when there's nothing to select.
+func (m *MessagesView) MoveSelection(delta int) bool {
+	if m.threadActive {
+		return moveSelection(&m.threadSelected, m.threadRows, &m.threadList, delta)
+	}
+	return moveSelection(&m.selected, m.rows, &m.list, delta)
+}
+
+func moveSelection(selected *int, rows []*messageRow, list *widget.List, delta int) bool {
+	if len(rows) == 0 {
+		return false
+	}
+	idx := *selected
+	if idx < 0 {
+		// First press from no selection lands on the most recent message —
+		// the user is staring at the bottom of the chat, so put the cursor
+		// where their eyes already are. From there, k walks back through
+		// history.
+		idx = len(rows) - 1
+	} else {
+		idx += delta
+	}
+	if idx < 0 {
+		idx = 0
+	}
+	if idx >= len(rows) {
+		idx = len(rows) - 1
+	}
+	*selected = idx
+
+	pos := &list.Position
+	if pos.Count <= 0 {
+		pos.First = idx
+		pos.Offset = 0
+	} else if idx < pos.First {
+		pos.First = idx
+		pos.Offset = 0
+	} else if idx >= pos.First+pos.Count {
+		pos.First = idx - pos.Count + 1
+		if pos.First < 0 {
+			pos.First = 0
+		}
+		pos.Offset = 0
+	}
+	// Stop pinning to bottom once the user steers manually; ScrollToEnd
+	// would otherwise yank us back to the latest message every frame.
+	list.ScrollToEnd = false
+	return true
+}
+
+// SetHeader updates the channel name shown above the messages.
+func (m *MessagesView) SetHeader(name, topic string) {
+	m.header = name
+	m.topic = topic
+}
+
+// SetMessages replaces the displayed messages, preserving rich-text state by
+// timestamp.
+func (m *MessagesView) SetMessages(msgs []slack.Message) {
+	old := make(map[string]*messageRow, len(m.rows))
+	for _, r := range m.rows {
+		old[r.msg.Timestamp] = r
+	}
+	// Track the timestamp of the previously selected row so the highlight
+	// follows the same message across refresh, even if newer messages have
+	// shifted the indices.
+	var selectedTS string
+	if m.selected >= 0 && m.selected < len(m.rows) {
+		selectedTS = m.rows[m.selected].msg.Timestamp
+	}
+	out := make([]*messageRow, 0, len(msgs))
+	for _, msg := range msgs {
+		r, ok := old[msg.Timestamp]
+		if !ok {
+			r = &messageRow{}
+		}
+		r.msg = msg
+		out = append(out, r)
+	}
+	m.rows = out
+
+	m.selected = -1
+	if selectedTS != "" {
+		for i, r := range out {
+			if r.msg.Timestamp == selectedTS {
+				m.selected = i
+				break
+			}
+		}
+	}
+	if m.pendFocusLast && len(m.rows) > 0 {
+		m.selected = len(m.rows) - 1
+		pos := &m.list.Position
+		pos.First = m.selected
+		pos.Offset = 0
+		m.list.ScrollToEnd = true
+		m.pendFocusLast = false
+	}
+}
+
+// Layout draws the header bar plus the scrollable list. Switches between
+// the channel history and thread reply list based on threadActive. When the
+// author panel is open, it's rendered as a fixed-width side frame to the
+// right of the message list.
+func (m *MessagesView) Layout(gtx layout.Context, th *Theme, fmt *slack.Formatter) layout.Dimensions {
+	return layout.Flex{Axis: layout.Horizontal}.Layout(gtx,
+		layout.Flexed(1, func(gtx layout.Context) layout.Dimensions {
+			return m.layoutMessages(gtx, th, fmt)
+		}),
+		layout.Rigid(func(gtx layout.Context) layout.Dimensions {
+			if !m.authorOpen {
+				return layout.Dimensions{}
+			}
+			gtx.Constraints.Min.X = gtx.Dp(unit.Dp(320))
+			gtx.Constraints.Max.X = gtx.Dp(unit.Dp(320))
+			return m.layoutAuthor(gtx, th)
+		}),
+	)
+}
+
+func (m *MessagesView) layoutMessages(gtx layout.Context, th *Theme, fmt *slack.Formatter) layout.Dimensions {
+	list := &m.list
+	rows := m.rows
+	if m.threadActive {
+		list = &m.threadList
+		rows = m.threadRows
+	}
+	return layout.Flex{Axis: layout.Vertical}.Layout(gtx,
+		layout.Rigid(func(gtx layout.Context) layout.Dimensions {
+			return m.layoutHeader(gtx, th)
+		}),
+		layout.Flexed(1, func(gtx layout.Context) layout.Dimensions {
+			return paintedBg(gtx, th.Pal.Bg, func(gtx layout.Context) layout.Dimensions {
+				return material.List(th.Mat, list).Layout(gtx, len(rows), func(gtx layout.Context, idx int) layout.Dimensions {
+					return m.layoutRow(gtx, th, fmt, idx, rows[idx])
+				})
+			})
+		}),
+	)
+}
+
+func (m *MessagesView) layoutAuthor(gtx layout.Context, th *Theme) layout.Dimensions {
+	return paintedBg(gtx, th.Pal.BgSidebar, func(gtx layout.Context) layout.Dimensions {
+		return layout.Inset{
+			Top:    unit.Dp(10),
+			Bottom: unit.Dp(10),
+			Left:   unit.Dp(12),
+			Right:  unit.Dp(12),
+		}.Layout(gtx, func(gtx layout.Context) layout.Dimensions {
+			children := make([]layout.FlexChild, 0, len(m.authorRows)+5)
+			children = append(children, layout.Rigid(func(gtx layout.Context) layout.Dimensions {
+				return m.layoutAuthorHeader(gtx, th)
+			}))
+			children = append(children, layout.Rigid(layout.Spacer{Height: unit.Dp(8)}.Layout))
+			for i, f := range m.authorRows {
+				i, f := i, f
+				children = append(children, layout.Rigid(func(gtx layout.Context) layout.Dimensions {
+					return m.layoutAuthorField(gtx, th, i, f)
+				}))
+			}
+			children = append(children, layout.Rigid(layout.Spacer{Height: unit.Dp(10)}.Layout))
+			children = append(children, layout.Rigid(func(gtx layout.Context) layout.Dimensions {
+				lbl := material.Caption(th.Mat, "j/k navigate · y copy · h close")
+				lbl.Color = th.Pal.TextDim
+				return lbl.Layout(gtx)
+			}))
+			return layout.Flex{Axis: layout.Vertical}.Layout(gtx, children...)
+		})
+	})
+}
+
+// layoutAuthorHeader renders the avatar (when known) plus the user's display
+// name above the field list. The avatar is requested from the same async
+// loader used for inline message images, so it pops in after the first frame.
+func (m *MessagesView) layoutAuthorHeader(gtx layout.Context, th *Theme) layout.Dimensions {
+	const avatarDp = 56
+	avatarOp, hasAvatar := m.authorAvatarOp(gtx)
+	return layout.Flex{Axis: layout.Vertical, Alignment: layout.Middle}.Layout(gtx,
+		layout.Rigid(func(gtx layout.Context) layout.Dimensions {
+			if !hasAvatar {
+				return layout.Dimensions{}
+			}
+			gtx.Constraints.Max.X = gtx.Dp(unit.Dp(avatarDp))
+			gtx.Constraints.Max.Y = gtx.Dp(unit.Dp(avatarDp))
+			gtx.Constraints.Min = gtx.Constraints.Max
+			w := widget.Image{
+				Src:      avatarOp,
+				Fit:      widget.Cover,
+				Position: layout.Center,
+			}
+			return w.Layout(gtx)
+		}),
+		layout.Rigid(layout.Spacer{Height: unit.Dp(6)}.Layout),
+		layout.Rigid(func(gtx layout.Context) layout.Dimensions {
+			name := m.authorName
+			if name == "" {
+				name = "Author"
+			}
+			lbl := material.Subtitle1(th.Mat, name)
+			lbl.Color = th.Pal.Text
+			lbl.Font.Weight = font.Bold
+			lbl.Alignment = text.Middle
+			return lbl.Layout(gtx)
+		}),
+	)
+}
+
+// authorAvatarOp returns the cached image op for the panel avatar.
+func (m *MessagesView) authorAvatarOp(_ layout.Context) (paint.ImageOp, bool) {
+	if m.authorAvatar == "" || m.images == nil {
+		return paint.ImageOp{}, false
+	}
+	op, hasOp, _ := m.images.GetOp(m.authorAvatar)
+	return op, hasOp
+}
+
+func (m *MessagesView) layoutAuthorField(gtx layout.Context, th *Theme, idx int, f authorField) layout.Dimensions {
+	bg := th.Pal.BgSidebar
+	if idx == m.authorSelected {
+		bg = withAlpha(th.Pal.Selection, 0x40)
+	}
+	return paintedBg(gtx, bg, func(gtx layout.Context) layout.Dimensions {
+		return layout.Inset{
+			Top:    unit.Dp(4),
+			Bottom: unit.Dp(4),
+			Left:   unit.Dp(6),
+			Right:  unit.Dp(6),
+		}.Layout(gtx, func(gtx layout.Context) layout.Dimensions {
+			return layout.Flex{Axis: layout.Vertical}.Layout(gtx,
+				layout.Rigid(func(gtx layout.Context) layout.Dimensions {
+					lbl := material.Caption(th.Mat, f.Label)
+					lbl.Color = th.Pal.TextDim
+					return lbl.Layout(gtx)
+				}),
+				layout.Rigid(func(gtx layout.Context) layout.Dimensions {
+					lbl := material.Body2(th.Mat, f.Value)
+					lbl.Color = th.Pal.Text
+					return lbl.Layout(gtx)
+				}),
+			)
+		})
+	})
+}
+
+func (m *MessagesView) layoutHeader(gtx layout.Context, th *Theme) layout.Dimensions {
+	if m.header == "" {
+		return layout.Dimensions{Size: gtx.Constraints.Min}
+	}
+	title := "# " + m.header
+	subtitle := m.topic
+	if m.threadActive {
+		title = "↳ Thread in #" + m.header
+		subtitle = "press h to return to #" + m.header
+	}
+	return paintedBg(gtx, th.Pal.BgHeader, func(gtx layout.Context) layout.Dimensions {
+		return layout.Inset{
+			Top:    unit.Dp(8),
+			Bottom: unit.Dp(8),
+			Left:   unit.Dp(14),
+			Right:  unit.Dp(14),
+		}.Layout(gtx, func(gtx layout.Context) layout.Dimensions {
+			return layout.Flex{Axis: layout.Vertical}.Layout(gtx,
+				layout.Rigid(func(gtx layout.Context) layout.Dimensions {
+					lbl := material.Subtitle1(th.Mat, title)
+					lbl.Color = th.Pal.Text
+					lbl.Font.Weight = font.Bold
+					return lbl.Layout(gtx)
+				}),
+				layout.Rigid(func(gtx layout.Context) layout.Dimensions {
+					if subtitle == "" {
+						return layout.Dimensions{}
+					}
+					lbl := material.Caption(th.Mat, subtitle)
+					lbl.Color = th.Pal.TextDim
+					return lbl.Layout(gtx)
+				}),
+			)
+		})
+	})
+}
+
+func (m *MessagesView) layoutRow(gtx layout.Context, th *Theme, fmt *slack.Formatter, idx int, r *messageRow) layout.Dimensions {
+	selected := m.selected
+	if m.threadActive {
+		selected = m.threadSelected
+	}
+	bg := th.Pal.Bg
+	if m.focused && idx == selected {
+		bg = withAlpha(th.Pal.Selection, 0x40)
+	}
+	return paintedBg(gtx, bg, func(gtx layout.Context) layout.Dimensions {
+		return layout.Inset{
+		Top:    unit.Dp(7),
+		Bottom: unit.Dp(7),
+		Left:   unit.Dp(14),
+		Right:  unit.Dp(14),
+	}.Layout(gtx, func(gtx layout.Context) layout.Dimensions {
+		return layout.Flex{Axis: layout.Vertical}.Layout(gtx,
+			// Header line: username + time
+			layout.Rigid(func(gtx layout.Context) layout.Dimensions {
+				return layout.Flex{Alignment: layout.Middle}.Layout(gtx,
+					layout.Rigid(func(gtx layout.Context) layout.Dimensions {
+						u := fmt.GetUser(r.msg.UserID)
+						if u == nil || u.ImageURL == "" {
+							return layout.Dimensions{}
+						}
+						op, hasOp, _ := m.images.GetOp(u.ImageURL)
+						if !hasOp {
+							return layout.Dimensions{}
+						}
+						return layout.Flex{Alignment: layout.Middle}.Layout(gtx,
+							layout.Rigid(func(gtx layout.Context) layout.Dimensions {
+								gtx.Constraints.Max.X = gtx.Dp(unit.Dp(20))
+								gtx.Constraints.Max.Y = gtx.Dp(unit.Dp(20))
+								gtx.Constraints.Min = gtx.Constraints.Max
+								w := widget.Image{
+									Src:      op,
+									Fit:      widget.Cover,
+									Position: layout.Center,
+								}
+								return w.Layout(gtx)
+							}),
+							layout.Rigid(layout.Spacer{Width: unit.Dp(6)}.Layout),
+						)
+					}),
+					layout.Rigid(func(gtx layout.Context) layout.Dimensions {
+						name := r.msg.Username
+						if name == "" {
+							name = r.msg.UserID
+						}
+						lbl := material.Body1(th.Mat, name)
+						lbl.Font.Weight = font.Bold
+						lbl.Color = th.Pal.Text
+						return lbl.Layout(gtx)
+					}),
+					layout.Rigid(layout.Spacer{Width: unit.Dp(8)}.Layout),
+					layout.Rigid(func(gtx layout.Context) layout.Dimensions {
+						lbl := material.Caption(th.Mat, fmt.FormatTimeOnly(r.msg.Timestamp))
+						lbl.Color = th.Pal.TextDim
+						return lbl.Layout(gtx)
+					}),
+				)
+			}),
+			// Body: styled richtext
+			layout.Rigid(func(gtx layout.Context) layout.Dimensions {
+				return m.layoutBody(gtx, th, fmt, r)
+			}),
+			// Thread indicator (only on the channel-history view; inside a
+			// thread every row is by definition part of one).
+			layout.Rigid(func(gtx layout.Context) layout.Dimensions {
+				if m.threadActive || r.msg.ReplyCount <= 0 {
+					return layout.Dimensions{}
+				}
+				return m.layoutThreadBadge(gtx, th, r.msg.ReplyCount)
+			}),
+			// Inline image previews
+			layout.Rigid(func(gtx layout.Context) layout.Dimensions {
+				return m.layoutFiles(gtx, th, r.msg.Files)
+			}),
+			// Reactions row (compact)
+			layout.Rigid(func(gtx layout.Context) layout.Dimensions {
+				if len(r.msg.Reactions) == 0 {
+					return layout.Dimensions{}
+				}
+				return layout.Inset{Top: unit.Dp(2)}.Layout(gtx, func(gtx layout.Context) layout.Dimensions {
+					return m.layoutReactions(gtx, th, fmt, r.msg.Reactions)
+				})
+			}),
+		)
+	})
+	})
+}
+
+func (m *MessagesView) layoutBody(gtx layout.Context, th *Theme, fm *slack.Formatter, r *messageRow) layout.Dimensions {
+	spans := fm.FormatSpans(r.msg.Text)
+	if len(spans) == 0 {
+		return layout.Dimensions{}
+	}
+	styles := make([]richtext.SpanStyle, 0, len(spans))
+	for _, s := range spans {
+		styles = append(styles, toRichSpan(s, th))
+	}
+	return richtext.Text(&r.rich, th.Mat.Shaper, styles...).Layout(gtx)
+}
+
+// layoutFiles renders inline previews for image attachments. Non-image files
+// fall through as a small "name (mimetype)" caption so they're at least
+// discoverable; future work can extend this for other types.
+func (m *MessagesView) layoutFiles(gtx layout.Context, th *Theme, files []slack.File) layout.Dimensions {
+	if len(files) == 0 || m.images == nil {
+		return layout.Dimensions{}
+	}
+	const maxW, maxH = 320, 240 // dp; thumbnail-sized preview cap
+	children := make([]layout.FlexChild, 0, len(files))
+	for _, f := range files {
+		f := f
+		if !f.IsImage() {
+			children = append(children, layout.Rigid(func(gtx layout.Context) layout.Dimensions {
+				lbl := material.Caption(th.Mat, "📎 "+f.Name)
+				lbl.Color = th.Pal.TextDim
+				return layout.Inset{Top: unit.Dp(2)}.Layout(gtx, lbl.Layout)
+			}))
+			continue
+		}
+		children = append(children, layout.Rigid(func(gtx layout.Context) layout.Dimensions {
+			return layout.Inset{Top: unit.Dp(4)}.Layout(gtx, func(gtx layout.Context) layout.Dimensions {
+				return m.layoutImage(gtx, th, f, maxW, maxH)
+			})
+		}))
+	}
+	return layout.Flex{Axis: layout.Vertical}.Layout(gtx, children...)
+}
+
+func (m *MessagesView) layoutImage(gtx layout.Context, th *Theme, f slack.File, maxW, maxH int) layout.Dimensions {
+	op, hasOp, done := m.images.GetOp(f.ThumbnailURL())
+	if !done {
+		lbl := material.Caption(th.Mat, "🖼  loading "+f.Name+"…")
+		lbl.Color = th.Pal.TextDim
+		return lbl.Layout(gtx)
+	}
+	if !hasOp {
+		lbl := material.Caption(th.Mat, "🖼  "+f.Name+" (failed to load)")
+		lbl.Color = th.Pal.TextDim
+		return lbl.Layout(gtx)
+	}
+	// Compute a target size that preserves the image's aspect ratio while
+	// fitting inside maxW x maxH dp (and inside whatever the parent gave us
+	// horizontally). Doing the math here lets us hand widget.Image a fixed-
+	// size box, which avoids the surprising "image stretched along one axis
+	// because Min was nonzero" outcomes you can hit with Fit: Contain alone.
+	sz := op.Size()
+	if sz.X <= 0 || sz.Y <= 0 {
+		return layout.Dimensions{}
+	}
+	maxPxW := min(gtx.Constraints.Max.X, gtx.Dp(unit.Dp(maxW)))
+	maxPxH := gtx.Dp(unit.Dp(maxH))
+	if maxPxW <= 0 || maxPxH <= 0 {
+		return layout.Dimensions{}
+	}
+	scale := float32(maxPxW) / float32(sz.X)
+	if s := float32(maxPxH) / float32(sz.Y); s < scale {
+		scale = s
+	}
+	if scale > 1 {
+		scale = 1
+	}
+	target := image.Point{
+		X: int(float32(sz.X) * scale),
+		Y: int(float32(sz.Y) * scale),
+	}
+	if target.X < 1 || target.Y < 1 {
+		return layout.Dimensions{}
+	}
+	gtx.Constraints = layout.Exact(target)
+	w := widget.Image{
+		Src:      op,
+		Fit:      widget.Contain,
+		Position: layout.NW,
+	}
+	return w.Layout(gtx)
+}
+
+// layoutThreadBadge renders a "💬 N replies" caption pinned under the message
+// body so threads are visible in the channel history without drilling in.
+func (m *MessagesView) layoutThreadBadge(gtx layout.Context, th *Theme, count int) layout.Dimensions {
+	noun := "replies"
+	if count == 1 {
+		noun = "reply"
+	}
+	return layout.Inset{Top: unit.Dp(2)}.Layout(gtx, func(gtx layout.Context) layout.Dimensions {
+		lbl := material.Caption(th.Mat, fmt.Sprintf("💬 %d %s", count, noun))
+		lbl.Color = th.Pal.Link
+		lbl.Font.Weight = font.Medium
+		return lbl.Layout(gtx)
+	})
+}
+
+func (m *MessagesView) layoutReactions(gtx layout.Context, th *Theme, fm *slack.Formatter, rs []slack.Reaction) layout.Dimensions {
+	children := make([]layout.FlexChild, 0, len(rs)*2)
+	for _, r := range rs {
+		r := r
+		children = append(children, layout.Rigid(func(gtx layout.Context) layout.Dimensions {
+			return m.layoutReactionChip(gtx, th, fm, r)
+		}))
+		children = append(children, layout.Rigid(layout.Spacer{Width: unit.Dp(4)}.Layout))
+	}
+	return layout.Flex{Alignment: layout.Middle}.Layout(gtx, children...)
+}
+
+func (m *MessagesView) layoutReactionChip(gtx layout.Context, th *Theme, fm *slack.Formatter, r slack.Reaction) layout.Dimensions {
+	bg := withAlpha(th.Pal.BgCode, 0xff)
+	textColor := th.Pal.Text
+	if r.HasMe {
+		bg = withAlpha(th.Pal.Accent, 0x55)
+		textColor = th.Pal.AccentText
+	}
+	return paintedBg(gtx, bg, func(gtx layout.Context) layout.Dimensions {
+		return layout.Inset{
+			Top:    unit.Dp(2),
+			Bottom: unit.Dp(2),
+			Left:   unit.Dp(6),
+			Right:  unit.Dp(6),
+		}.Layout(gtx, func(gtx layout.Context) layout.Dimensions {
+			return layout.Flex{Alignment: layout.Middle}.Layout(gtx,
+				layout.Rigid(func(gtx layout.Context) layout.Dimensions {
+					emoji := material.Body2(th.Mat, fm.FormatEmoji(r.Name))
+					emoji.Color = textColor
+					return emoji.Layout(gtx)
+				}),
+				layout.Rigid(layout.Spacer{Width: unit.Dp(4)}.Layout),
+				layout.Rigid(func(gtx layout.Context) layout.Dimensions {
+					count := r.Count
+					if count <= 0 {
+						count = 1
+					}
+					lbl := material.Body2(th.Mat, fmt.Sprintf("%d", count))
+					lbl.Color = textColor
+					lbl.Font.Weight = font.Medium
+					return lbl.Layout(gtx)
+				}),
+			)
+		})
+	})
+}
+
+// toRichSpan converts a backend Span to a Gio richtext SpanStyle, applying
+// the current theme's palette and font choices.
+func toRichSpan(s slack.Span, th *Theme) richtext.SpanStyle {
+	out := richtext.SpanStyle{
+		Content: s.Text,
+		Color:   th.Pal.Text,
+		Size:    th.Mat.TextSize,
+	}
+	if s.Style&slack.StyleBold != 0 {
+		out.Font.Weight = font.Bold
+	}
+	if s.Style&slack.StyleItalic != 0 {
+		out.Font.Style = font.Italic
+	}
+	if s.Style&slack.StyleStrike != 0 {
+		// Gio doesn't render strikethrough natively; dim the color so the
+		// reader sees something different from regular text.
+		out.Color = th.Pal.TextDim
+	}
+	if s.Style&(slack.StyleCode|slack.StyleCodeBlock) != 0 {
+		out.Font.Typeface = "Go Mono"
+		out.Color = lighten(th.Pal.Text)
+	}
+	if s.Style&slack.StyleLink != 0 {
+		out.Color = th.Pal.Link
+		out.Interactive = true
+		if s.Link != "" {
+			out.Set("url", s.Link)
+		}
+	}
+	switch {
+	case s.Style&slack.StyleStaging != 0:
+		out.Color = th.Pal.Staging
+	case s.Style&slack.StyleProduction != 0:
+		out.Color = th.Pal.Production
+	case s.Style&slack.StyleResolved != 0:
+		out.Color = th.Pal.Resolved
+		out.Content = "● " + out.Content
+	case s.Style&slack.StyleFiring != 0:
+		out.Color = th.Pal.Firing
+		out.Content = "● " + out.Content
+	case s.Style&slack.StyleMention != 0:
+		out.Color = th.Pal.Mention
+	}
+	return out
+}
+
+func lighten(c color.NRGBA) color.NRGBA {
+	add := func(v uint8, by uint8) uint8 {
+		if int(v)+int(by) > 255 {
+			return 255
+		}
+		return v + by
+	}
+	return color.NRGBA{R: add(c.R, 16), G: add(c.G, 16), B: add(c.B, 16), A: c.A}
+}
