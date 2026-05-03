@@ -2,6 +2,7 @@ package ui
 
 import (
 	"strings"
+	"unicode/utf8"
 
 	"gioui.org/font"
 	"gioui.org/layout"
@@ -19,6 +20,7 @@ type ReactionPicker struct {
 	editor    widget.Editor
 	list      widget.List
 	all       []slack.EmojiEntry
+	existing  []string
 	rows      []*reactionRow
 	selected  int
 	lastQuery string
@@ -44,10 +46,11 @@ func (r *ReactionPicker) SetEmojis(entries []slack.EmojiEntry) {
 }
 
 // Reset clears the query and selection. Call when the picker opens.
-func (r *ReactionPicker) Reset() {
+func (r *ReactionPicker) Reset(existing []string) {
 	r.editor.SetText("")
 	r.lastQuery = ""
 	r.selected = 0
+	r.existing = existing
 	r.list.Position.First = 0
 	r.list.Position.Offset = 0
 	r.refilter()
@@ -55,6 +58,25 @@ func (r *ReactionPicker) Reset() {
 
 // Editor exposes the input widget so the host can manage focus on it.
 func (r *ReactionPicker) Editor() *widget.Editor { return &r.editor }
+
+// DeleteLastWord deletes the last word in the editor, simulating Ctrl+W.
+func (r *ReactionPicker) DeleteLastWord() {
+	text := r.editor.Text()
+	if text == "" {
+		return
+	}
+	trimmed := strings.TrimRight(text, " \t")
+	idx := strings.LastIndexAny(trimmed, " \t")
+	var newText string
+	if idx == -1 {
+		newText = ""
+	} else {
+		newText = text[:idx+1]
+	}
+	r.editor.SetText(newText)
+	l := utf8.RuneCountInString(newText)
+	r.editor.SetCaret(l, l)
+}
 
 // MoveSelection shifts the highlighted row, scrolling to keep it in view.
 func (r *ReactionPicker) MoveSelection(delta int) {
@@ -98,11 +120,28 @@ func (r *ReactionPicker) refilter() {
 	query := strings.TrimSpace(strings.ToLower(r.editor.Text()))
 	r.lastQuery = query
 	out := r.rows[:0]
+
+	existingMap := make(map[string]bool)
+	for _, name := range r.existing {
+		existingMap[name] = true
+	}
+
 	for _, e := range r.all {
-		if query == "" || strings.Contains(e.Name, query) {
-			out = append(out, &reactionRow{entry: e})
+		if existingMap[e.Name] {
+			if query == "" || strings.Contains(e.Name, query) {
+				out = append(out, &reactionRow{entry: e})
+			}
 		}
 	}
+
+	for _, e := range r.all {
+		if !existingMap[e.Name] {
+			if query == "" || strings.Contains(e.Name, query) {
+				out = append(out, &reactionRow{entry: e})
+			}
+		}
+	}
+
 	r.rows = out
 	if r.selected >= len(r.rows) {
 		r.selected = len(r.rows) - 1

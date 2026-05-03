@@ -114,6 +114,7 @@ type SectionFonts struct {
 	Composer FontStyle
 	Code     FontStyle
 	Search   FontStyle
+	UserInfo FontStyle
 }
 
 // Theme bundles the gioui Material theme with our palette.
@@ -237,6 +238,7 @@ func (t *Theme) ApplyFontPrefs(p sectionPrefs) {
 	apply(&t.Fonts.Composer, p.Composer)
 	apply(&t.Fonts.Code, p.Code)
 	apply(&t.Fonts.Search, p.Search)
+	apply(&t.Fonts.UserInfo, p.UserInfo)
 }
 
 func (t *Theme) ApplyThemePrefs(sidebarTheme, mainTheme string) {
@@ -267,6 +269,7 @@ type sectionPrefs struct {
 	Composer FontStyle
 	Code     FontStyle
 	Search   FontStyle
+	UserInfo FontStyle
 }
 
 // uniqueFaces collapses the loaded font collection into a sorted, deduplicated

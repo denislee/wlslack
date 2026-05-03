@@ -153,7 +153,7 @@ func (a *App) layout(gtx layout.Context) layout.Dimensions {
 		layout.Rigid(func(gtx layout.Context) layout.Dimensions {
 			gtx.Constraints.Min.X = gtx.Dp(unit.Dp(240))
 			gtx.Constraints.Max.X = gtx.Dp(unit.Dp(240))
-			return a.channels.Layout(gtx, a.th)
+			return a.channels.Layout(gtx, a.th, a.fmt)
 		}),
 		layout.Flexed(1, func(gtx layout.Context) layout.Dimensions {
 			if a.settingsOpen {
@@ -266,6 +266,7 @@ func (a *App) handleKeys(gtx layout.Context) {
 			key.Filter{Focus: reactionEditor, Name: key.NameReturn},
 			key.Filter{Focus: reactionEditor, Name: "N", Required: key.ModCtrl},
 			key.Filter{Focus: reactionEditor, Name: "P", Required: key.ModCtrl},
+			key.Filter{Focus: reactionEditor, Name: "W", Required: key.ModCtrl},
 		)
 	}
 	if composerFocused {
@@ -286,7 +287,7 @@ func (a *App) handleKeys(gtx layout.Context) {
 			key.Filter{Name: "H"},
 			key.Filter{Name: "L"},
 			key.Filter{Name: "Y"},
-			key.Filter{Name: "R"},
+			key.Filter{Name: "R", Optional: key.ModShift},
 			key.Filter{Name: "Q"},
 			key.Filter{Name: "F"},
 			key.Filter{Name: "F", Required: key.ModCtrl},
@@ -367,7 +368,37 @@ func (a *App) handleKeys(gtx layout.Context) {
 				a.w.Invalidate()
 			}
 		case kev.Name == key.NameReturn && a.focusPane == paneMessages && !a.switcherOpen && !a.reactionPickerOpen:
+			if ts := a.messages.DeletePendingTS(); ts != "" {
+				_, msgTS, ok := a.messages.SelectedMessage()
+				if ok && msgTS == ts {
+					ch := a.getActiveID()
+					if a.messages.InThread() {
+						ch, _ = a.messages.ThreadInfo()
+					}
+					a.client.DeleteMessage(ch, ts)
+					a.messages.SetDeletePendingTS("")
+					a.w.Invalidate()
+					continue
+				}
+			}
 			a.openSelectedLinks()
+		case kev.Name == "D":
+			if a.focusPane == paneMessages {
+				msg, ts, ok := a.messages.SelectedMessage()
+				if ok && msg.UserID == a.client.GetSelfID() {
+					if a.messages.DeletePendingTS() == ts {
+						ch := a.getActiveID()
+						if a.messages.InThread() {
+							ch, _ = a.messages.ThreadInfo()
+						}
+						a.client.DeleteMessage(ch, ts)
+						a.messages.SetDeletePendingTS("")
+					} else {
+						a.messages.SetDeletePendingTS(ts)
+					}
+					a.w.Invalidate()
+				}
+			}
 		case a.switcherOpen && (kev.Name == key.NameUpArrow || (kev.Name == "P" && kev.Modifiers.Contain(key.ModCtrl))):
 			a.switcher.MoveSelection(-1)
 			a.w.Invalidate()
@@ -381,6 +412,9 @@ func (a *App) handleKeys(gtx layout.Context) {
 			a.w.Invalidate()
 		case a.reactionPickerOpen && (kev.Name == key.NameDownArrow || (kev.Name == "N" && kev.Modifiers.Contain(key.ModCtrl))):
 			a.reactionPicker.MoveSelection(1)
+			a.w.Invalidate()
+		case a.reactionPickerOpen && kev.Name == "W" && kev.Modifiers.Contain(key.ModCtrl):
+			a.reactionPicker.DeleteLastWord()
 			a.w.Invalidate()
 		case a.reactionPickerOpen && kev.Name == key.NameReturn:
 			a.reactionPicker.Submit()
@@ -421,6 +455,8 @@ func (a *App) handleKeys(gtx layout.Context) {
 			// channels-pane focus. This keeps h/l symmetrical with the
 			// l-to-drill-in progression.
 			switch {
+			case a.imageViewerOpen:
+				a.closeImageViewer()
 			case a.messages.CloseAuthor():
 				a.w.Invalidate()
 			case a.messages.CloseThread():
@@ -556,10 +592,17 @@ func (a *App) openReactionPicker() {
 	if chID == "" {
 		return
 	}
-	_ = msg
+
+	var existing []string
+	for _, r := range msg.Reactions {
+		if r.Name != "" {
+			existing = append(existing, r.Name)
+		}
+	}
+
 	a.reactionTargetCh = chID
 	a.reactionTargetTS = ts
-	a.reactionPicker.Reset()
+	a.reactionPicker.Reset(existing)
 	a.reactionPickerOpen = true
 	a.pendFocusReactionPicker = true
 	a.w.Invalidate()
@@ -705,6 +748,8 @@ func prefsFromState(p config.FontPrefs) sectionPrefs {
 		Messages: conv(p.Messages),
 		Composer: conv(p.Composer),
 		Code:     conv(p.Code),
+		Search:   conv(p.Search),
+		UserInfo: conv(p.UserInfo),
 	}
 }
 
@@ -716,6 +761,8 @@ func stateFromTheme(th *Theme) config.FontPrefs {
 		Messages: conv(th.Fonts.Messages),
 		Composer: conv(th.Fonts.Composer),
 		Code:     conv(th.Fonts.Code),
+		Search:   conv(th.Fonts.Search),
+		UserInfo: conv(th.Fonts.UserInfo),
 	}
 }
 

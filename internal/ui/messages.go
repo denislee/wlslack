@@ -51,6 +51,8 @@ type MessagesView struct {
 	authorAvatar   string // image URL for the panel header, "" when missing
 	authorName     string // display name shown next to the avatar
 
+	deletePendingTS string
+
 	images *slack.ImageLoader
 }
 
@@ -61,7 +63,7 @@ type authorField struct {
 
 type messageRow struct {
 	msg     slack.Message
-	rich    richtext.InteractiveText
+	rich    []richtext.InteractiveText
 }
 
 func newMessagesView(images *slack.ImageLoader) *MessagesView {
@@ -90,6 +92,7 @@ func (m *MessagesView) Reset() {
 	m.threadTS = ""
 	m.threadRows = nil
 	m.threadSelected = -1
+	m.deletePendingTS = ""
 }
 
 // FocusLast lands selection on the most recent message in the channel-history
@@ -234,7 +237,16 @@ func (m *MessagesView) CloseThread() bool {
 	m.authorOpen = false
 	m.authorRows = nil
 	m.authorSelected = 0
+	m.deletePendingTS = ""
 	return true
+}
+
+func (m *MessagesView) DeletePendingTS() string {
+	return m.deletePendingTS
+}
+
+func (m *MessagesView) SetDeletePendingTS(ts string) {
+	m.deletePendingTS = ts
 }
 
 // HasThreadSelection reports whether the thread list has a highlighted row
@@ -379,6 +391,7 @@ func (m *MessagesView) SetThreadMessages(msgs []slack.Message) {
 // MoveSelection shifts the selection by delta and scrolls the active list to
 // keep the new row visible. Returns false when there's nothing to select.
 func (m *MessagesView) MoveSelection(delta int) bool {
+	m.deletePendingTS = ""
 	if m.threadActive {
 		return moveSelection(&m.threadSelected, m.threadRows, &m.threadList, delta)
 	}
@@ -581,6 +594,7 @@ func (m *MessagesView) layoutAuthorHeader(gtx layout.Context, th *Theme) layout.
 			lbl.Color = th.Pal.Text
 			lbl.Font.Weight = font.Bold
 			lbl.Alignment = text.Middle
+			th.applyFont(&lbl, th.Fonts.UserInfo)
 			return lbl.Layout(gtx)
 		}),
 	)
@@ -611,11 +625,13 @@ func (m *MessagesView) layoutAuthorField(gtx layout.Context, th *Theme, idx int,
 				layout.Rigid(func(gtx layout.Context) layout.Dimensions {
 					lbl := material.Caption(th.Mat, f.Label)
 					lbl.Color = th.Pal.TextDim
+					th.applyFont(&lbl, th.Fonts.UserInfo)
 					return lbl.Layout(gtx)
 				}),
 				layout.Rigid(func(gtx layout.Context) layout.Dimensions {
 					lbl := material.Body2(th.Mat, f.Value)
 					lbl.Color = th.Pal.Text
+					th.applyFont(&lbl, th.Fonts.UserInfo)
 					return lbl.Layout(gtx)
 				}),
 			)
@@ -684,78 +700,104 @@ func (m *MessagesView) layoutRow(gtx layout.Context, th *Theme, fmt *slack.Forma
 		Left:   unit.Dp(16),
 		Right:  unit.Dp(16),
 	}.Layout(gtx, func(gtx layout.Context) layout.Dimensions {
-		return layout.Flex{Axis: layout.Vertical}.Layout(gtx,
-			// Header line: username + time
+		return layout.Flex{Axis: layout.Horizontal, Alignment: layout.Start}.Layout(gtx,
+			// Left column: Avatar
 			layout.Rigid(func(gtx layout.Context) layout.Dimensions {
-				return layout.Flex{Alignment: layout.Middle}.Layout(gtx,
+				var op paint.ImageOp
+				var hasOp bool
+				u := fmt.GetUser(r.msg.UserID)
+				if u != nil && u.ImageURL != "" {
+					op, hasOp, _ = m.images.GetOp(u.ImageURL)
+				}
+				return layout.Flex{Axis: layout.Horizontal}.Layout(gtx,
 					layout.Rigid(func(gtx layout.Context) layout.Dimensions {
-						u := fmt.GetUser(r.msg.UserID)
-						if u == nil || u.ImageURL == "" {
-							return layout.Dimensions{}
-						}
-						op, hasOp, _ := m.images.GetOp(u.ImageURL)
 						if !hasOp {
-							return layout.Dimensions{}
+							return layout.Spacer{Width: unit.Dp(36), Height: unit.Dp(36)}.Layout(gtx)
 						}
-						return layout.Flex{Alignment: layout.Middle}.Layout(gtx,
-							layout.Rigid(func(gtx layout.Context) layout.Dimensions {
-								gtx.Constraints.Max.X = gtx.Dp(unit.Dp(20))
-								gtx.Constraints.Max.Y = gtx.Dp(unit.Dp(20))
-								gtx.Constraints.Min = gtx.Constraints.Max
-								w := widget.Image{
-									Src:      op,
-									Fit:      widget.Cover,
-									Position: layout.Center,
-								}
-								return w.Layout(gtx)
-							}),
-							layout.Rigid(layout.Spacer{Width: unit.Dp(6)}.Layout),
-						)
-					}),
-					layout.Rigid(func(gtx layout.Context) layout.Dimensions {
-						name := r.msg.Username
-						if name == "" {
-							name = r.msg.UserID
+						gtx.Constraints.Max.X = gtx.Dp(unit.Dp(36))
+						gtx.Constraints.Max.Y = gtx.Dp(unit.Dp(36))
+						gtx.Constraints.Min = gtx.Constraints.Max
+						w := widget.Image{
+							Src:      op,
+							Fit:      widget.Cover,
+							Position: layout.Center,
 						}
-						lbl := material.Body1(th.Mat, name)
-						lbl.Font.Weight = font.SemiBold
-						lbl.Color = th.Pal.TextStrong
-						th.applyFont(&lbl, th.Fonts.Messages)
-						return lbl.Layout(gtx)
+						return w.Layout(gtx)
 					}),
-					layout.Rigid(layout.Spacer{Width: unit.Dp(8)}.Layout),
-					layout.Rigid(func(gtx layout.Context) layout.Dimensions {
-						lbl := material.Caption(th.Mat, fmt.FormatTimeOnly(r.msg.Timestamp))
-						lbl.Color = th.Pal.TextMuted
-						th.applyFont(&lbl, th.Fonts.Messages)
-						return lbl.Layout(gtx)
-					}),
+					layout.Rigid(layout.Spacer{Width: unit.Dp(12)}.Layout),
 				)
 			}),
-			// Body: styled richtext
-			layout.Rigid(func(gtx layout.Context) layout.Dimensions {
-				return m.layoutBody(gtx, th, fmt, r)
-			}),
-			// Thread indicator (only on the channel-history view; inside a
-			// thread every row is by definition part of one).
-			layout.Rigid(func(gtx layout.Context) layout.Dimensions {
-				if m.threadActive || r.msg.ReplyCount <= 0 {
-					return layout.Dimensions{}
-				}
-				return m.layoutThreadBadge(gtx, th, r.msg.ReplyCount)
-			}),
-			// Inline image previews
-			layout.Rigid(func(gtx layout.Context) layout.Dimensions {
-				return m.layoutFiles(gtx, th, r.msg.Files)
-			}),
-			// Reactions row (compact)
-			layout.Rigid(func(gtx layout.Context) layout.Dimensions {
-				if len(r.msg.Reactions) == 0 {
-					return layout.Dimensions{}
-				}
-				return layout.Inset{Top: unit.Dp(2)}.Layout(gtx, func(gtx layout.Context) layout.Dimensions {
-					return m.layoutReactions(gtx, th, fmt, r.msg.Reactions)
-				})
+			// Right column: Content
+			layout.Flexed(1, func(gtx layout.Context) layout.Dimensions {
+				return layout.Flex{Axis: layout.Vertical}.Layout(gtx,
+					// Header line: username + time
+					layout.Rigid(func(gtx layout.Context) layout.Dimensions {
+						return layout.Flex{Alignment: layout.Middle}.Layout(gtx,
+							layout.Rigid(func(gtx layout.Context) layout.Dimensions {
+								name := r.msg.Username
+								if name == "" {
+									name = r.msg.UserID
+								}
+								if u := fmt.GetUser(r.msg.UserID); u != nil {
+									if u.Presence == "active" {
+										name = "● " + name
+									} else {
+										name = "○ " + name
+									}
+								}
+								lbl := material.Body1(th.Mat, name)
+								lbl.Font.Weight = font.SemiBold
+								lbl.Color = th.Pal.TextStrong
+								th.applyFont(&lbl, th.Fonts.Messages)
+								return lbl.Layout(gtx)
+							}),
+							layout.Rigid(layout.Spacer{Width: unit.Dp(8)}.Layout),
+							layout.Rigid(func(gtx layout.Context) layout.Dimensions {
+								lbl := material.Caption(th.Mat, fmt.FormatTimeOnly(r.msg.Timestamp))
+								lbl.Color = th.Pal.TextMuted
+								th.applyFont(&lbl, th.Fonts.Messages)
+								return lbl.Layout(gtx)
+							}),
+						)
+					}),
+					// Body: styled richtext
+					layout.Rigid(func(gtx layout.Context) layout.Dimensions {
+						return m.layoutBody(gtx, th, fmt, r)
+					}),
+					// Thread indicator (only on the channel-history view; inside a
+					// thread every row is by definition part of one).
+					layout.Rigid(func(gtx layout.Context) layout.Dimensions {
+						if m.threadActive || r.msg.ReplyCount <= 0 {
+							return layout.Dimensions{}
+						}
+						return m.layoutThreadBadge(gtx, th, r.msg.ReplyCount)
+					}),
+					// Inline image previews
+					layout.Rigid(func(gtx layout.Context) layout.Dimensions {
+						return m.layoutFiles(gtx, th, r.msg.Files)
+					}),
+					// Reactions row (compact)
+					layout.Rigid(func(gtx layout.Context) layout.Dimensions {
+						if len(r.msg.Reactions) == 0 {
+							return layout.Dimensions{}
+						}
+						return layout.Inset{Top: unit.Dp(2)}.Layout(gtx, func(gtx layout.Context) layout.Dimensions {
+							return m.layoutReactions(gtx, th, fmt, r.msg.Reactions)
+						})
+					}),
+					// Deletion pending prompt
+					layout.Rigid(func(gtx layout.Context) layout.Dimensions {
+						if m.deletePendingTS == r.msg.Timestamp {
+							return layout.Inset{Top: unit.Dp(4)}.Layout(gtx, func(gtx layout.Context) layout.Dimensions {
+								lbl := material.Body2(th.Mat, "Press 'd' or 'Enter' again to delete...")
+								lbl.Color = th.Pal.Firing
+								lbl.Font.Weight = font.SemiBold
+								return lbl.Layout(gtx)
+							})
+						}
+						return layout.Dimensions{}
+					}),
+				)
 			}),
 		)
 	})
@@ -772,11 +814,49 @@ func (m *MessagesView) layoutBody(gtx layout.Context, th *Theme, fm *slack.Forma
 	if len(spans) == 0 {
 		return layout.Dimensions{}
 	}
-	styles := make([]richtext.SpanStyle, 0, len(spans))
-	for _, s := range spans {
-		styles = append(styles, toRichSpan(s, th))
+
+	type chunk struct {
+		isCodeBlock bool
+		spans       []slack.Span
 	}
-	return richtext.Text(&r.rich, th.Mat.Shaper, styles...).Layout(gtx)
+	var chunks []chunk
+	for _, s := range spans {
+		isCB := s.Style&slack.StyleCodeBlock != 0
+		if len(chunks) == 0 || chunks[len(chunks)-1].isCodeBlock != isCB {
+			chunks = append(chunks, chunk{isCodeBlock: isCB, spans: []slack.Span{s}})
+		} else {
+			chunks[len(chunks)-1].spans = append(chunks[len(chunks)-1].spans, s)
+		}
+	}
+
+	if len(r.rich) < len(chunks) {
+		r.rich = make([]richtext.InteractiveText, len(chunks))
+	}
+
+	var children []layout.FlexChild
+	for i, c := range chunks {
+		i := i
+		c := c
+		children = append(children, layout.Rigid(func(gtx layout.Context) layout.Dimensions {
+			styles := make([]richtext.SpanStyle, 0, len(c.spans))
+			for _, s := range c.spans {
+				styles = append(styles, toRichSpan(s, th))
+			}
+			w := richtext.Text(&r.rich[i], th.Mat.Shaper, styles...)
+			if c.isCodeBlock {
+				return layout.Inset{Top: unit.Dp(4), Bottom: unit.Dp(4)}.Layout(gtx, func(gtx layout.Context) layout.Dimensions {
+					return paintedBg(gtx, th.Pal.BgCode, func(gtx layout.Context) layout.Dimensions {
+						return withBorder(gtx, th.Pal.Border, borders{Top: true, Bottom: true, Left: true, Right: true}, func(gtx layout.Context) layout.Dimensions {
+							return layout.Inset{Top: unit.Dp(8), Bottom: unit.Dp(8), Left: unit.Dp(8), Right: unit.Dp(8)}.Layout(gtx, w.Layout)
+						})
+					})
+				})
+			}
+			return w.Layout(gtx)
+		}))
+	}
+
+	return layout.Flex{Axis: layout.Vertical}.Layout(gtx, children...)
 }
 
 // layoutFiles renders inline previews for image attachments. Non-image files
@@ -828,11 +908,9 @@ func (m *MessagesView) layoutImage(gtx layout.Context, th *Theme, f slack.File, 
 		lbl.Color = th.Pal.TextDim
 		return lbl.Layout(gtx)
 	}
-	// Compute a target size that preserves the image's aspect ratio while
-	// fitting inside maxW x maxH dp (and inside whatever the parent gave us
-	// horizontally). Doing the math here lets us hand widget.Image a fixed-
-	// size box, which avoids the surprising "image stretched along one axis
-	// because Min was nonzero" outcomes you can hit with Fit: Contain alone.
+	// Make all thumbnails a uniform square size.
+	// We use the minimum of maxPxW and maxPxH to ensure it's a perfect square
+	// that respects both the constraints and the provided max dimensions.
 	sz := op.Size()
 	if sz.X <= 0 || sz.Y <= 0 {
 		return layout.Dimensions{}
@@ -842,25 +920,21 @@ func (m *MessagesView) layoutImage(gtx layout.Context, th *Theme, f slack.File, 
 	if maxPxW <= 0 || maxPxH <= 0 {
 		return layout.Dimensions{}
 	}
-	scale := float32(maxPxW) / float32(sz.X)
-	if s := float32(maxPxH) / float32(sz.Y); s < scale {
-		scale = s
-	}
-	if scale > 1 {
-		scale = 1
-	}
+	
+	sizePx := min(maxPxW, maxPxH)
 	target := image.Point{
-		X: int(float32(sz.X) * scale),
-		Y: int(float32(sz.Y) * scale),
+		X: sizePx,
+		Y: sizePx,
 	}
+	
 	if target.X < 1 || target.Y < 1 {
 		return layout.Dimensions{}
 	}
 	gtx.Constraints = layout.Exact(target)
 	w := widget.Image{
 		Src:      op,
-		Fit:      widget.Contain,
-		Position: layout.NW,
+		Fit:      widget.Cover,
+		Position: layout.Center,
 	}
 	return w.Layout(gtx)
 }

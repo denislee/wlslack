@@ -26,6 +26,7 @@ type FontPrefs struct {
 	Composer FontPref `json:"composer"`
 	Code     FontPref `json:"code"`
 	Search   FontPref `json:"search"`
+	UserInfo FontPref `json:"user_info"`
 }
 
 type FontPref struct {

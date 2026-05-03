@@ -386,7 +386,7 @@ func (s *ChannelsSidebar) rebuildRows() {
 func headerKey(h string) string { return "__hdr:" + h }
 
 // Layout draws the sidebar.
-func (s *ChannelsSidebar) Layout(gtx layout.Context, th *Theme) layout.Dimensions {
+func (s *ChannelsSidebar) Layout(gtx layout.Context, th *Theme, fm *slack.Formatter) layout.Dimensions {
 	// Process row clicks.
 	var toggleHeader string
 	for _, r := range s.rows {
@@ -421,7 +421,7 @@ func (s *ChannelsSidebar) Layout(gtx layout.Context, th *Theme) layout.Dimension
 				if r.kind == rowHeader {
 					return s.layoutHeader(gtx, th, r)
 				}
-				return s.layoutRow(gtx, th, r)
+				return s.layoutRow(gtx, th, fm, r)
 			})
 		})
 	})
@@ -460,7 +460,7 @@ func (s *ChannelsSidebar) layoutHeader(gtx layout.Context, th *Theme, r *sidebar
 	})
 }
 
-func (s *ChannelsSidebar) layoutRow(gtx layout.Context, th *Theme, r *sidebarRow) layout.Dimensions {
+func (s *ChannelsSidebar) layoutRow(gtx layout.Context, th *Theme, fm *slack.Formatter, r *sidebarRow) layout.Dimensions {
 	active := r.channel.ID == s.activeID
 	hasUnread := r.channel.UnreadCount > 0
 
@@ -479,6 +479,16 @@ func (s *ChannelsSidebar) layoutRow(gtx layout.Context, th *Theme, r *sidebarRow
 	}
 
 	prefix := channelPrefix(r.channel)
+	if r.channel.IsIM && fm != nil {
+		if u := fm.GetUser(r.channel.UserID); u != nil {
+			if u.Presence == "active" {
+				prefix = "● "
+			} else {
+				prefix = "○ "
+			}
+		}
+	}
+
 	name := r.channel.Name
 	if name == "" {
 		name = r.channel.ID

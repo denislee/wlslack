@@ -46,6 +46,7 @@ func newSettingsScreen(th *Theme, onChange, onClose func()) *SettingsScreen {
 		{label: "Composer", target: &th.Fonts.Composer},
 		{label: "Code", target: &th.Fonts.Code, mono: true},
 		{label: "Search (ctrl+k)", target: &th.Fonts.Search},
+		{label: "User profile panel", target: &th.Fonts.UserInfo},
 	}
 	return s
 }

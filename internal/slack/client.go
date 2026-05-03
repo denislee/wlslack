@@ -458,6 +458,14 @@ func (c *Client) UpdateMessage(channelID, timestamp, text string) error {
 	return nil
 }
 
+func (c *Client) DeleteMessage(channelID, timestamp string) error {
+	_, _, err := c.api.DeleteMessage(channelID, timestamp)
+	if err != nil {
+		return fmt.Errorf("delete message: %w", friendlyError(err))
+	}
+	return nil
+}
+
 func (c *Client) SendThreadReply(channelID, threadTS, text string) error {
 	_, _, err := c.api.PostMessage(
 		channelID,
@@ -724,6 +732,16 @@ func (c *Client) convertMessage(msg slackapi.Message) Message {
 		editedTS = msg.Edited.Timestamp
 	}
 
+	if text == "" && len(files) == 0 {
+		slog.Debug("unrendered message",
+			"type", msg.Type,
+			"subtype", msg.SubType,
+			"bot_id", msg.BotID,
+			"blocks", len(msg.Blocks.BlockSet),
+			"attachments", len(msg.Attachments),
+			"raw_text", msg.Text)
+	}
+
 	return Message{
 		Timestamp:   msg.Timestamp,
 		UserID:      msg.User,
@@ -890,9 +908,22 @@ func (c *Client) extractAttachmentText(attachments []slackapi.Attachment) string
 		if a.Title != "" {
 			lines = append(lines, a.Title)
 		}
-		if a.Text != "" {
-			lines = append(lines, a.Text)
+
+		text := a.Text
+		if text == "" {
+			text = c.extractBlockText(a.Blocks.BlockSet)
+		} else if blockText := c.extractBlockText(a.Blocks.BlockSet); blockText != "" && !hasRichTextBlock(a.Blocks.BlockSet) {
+			text = blockText
 		}
+
+		if text != "" {
+			lines = append(lines, text)
+		}
+
+		if len(lines) == 0 && a.Fallback != "" {
+			lines = append(lines, a.Fallback)
+		}
+
 		if len(lines) > 0 {
 			parts = append(parts, strings.Join(lines, "\n"))
 		}
