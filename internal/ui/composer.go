@@ -4,6 +4,7 @@ import (
 	"image/color"
 	"strings"
 
+	"gioui.org/font"
 	"gioui.org/io/key"
 	"gioui.org/layout"
 	"gioui.org/unit"
@@ -41,13 +42,26 @@ func (c *Composer) Layout(gtx layout.Context, th *Theme, placeholder string, onS
 		}
 	}
 
-	return paintedBg(gtx, th.Pal.BgComposer, func(gtx layout.Context) layout.Dimensions {
-		return layout.UniformInset(unit.Dp(10)).Layout(gtx, func(gtx layout.Context) layout.Dimensions {
-			ed := material.Editor(th.Mat, &c.editor, placeholder)
-			ed.Color = th.Pal.Text
-			ed.HintColor = th.Pal.TextDim
-			ed.SelectionColor = withAlpha(th.Pal.Selection, 0x66)
-			return ed.Layout(gtx)
+	return withBorder(gtx, th.Pal.Border, borders{Top: true}, func(gtx layout.Context) layout.Dimensions {
+		return paintedBg(gtx, th.Pal.BgComposer, func(gtx layout.Context) layout.Dimensions {
+			return layout.Inset{
+				Top:    unit.Dp(10),
+				Bottom: unit.Dp(10),
+				Left:   unit.Dp(16),
+				Right:  unit.Dp(16),
+			}.Layout(gtx, func(gtx layout.Context) layout.Dimensions {
+				ed := material.Editor(th.Mat, &c.editor, placeholder)
+				ed.Color = th.Pal.Text
+				ed.HintColor = th.Pal.TextMuted
+				ed.SelectionColor = withAlpha(th.Pal.Selection, 0x66)
+				if th.Fonts.Composer.Face != "" {
+					ed.Font.Typeface = font.Typeface(th.Fonts.Composer.Face)
+				}
+				if th.Fonts.Composer.Size > 0 {
+					ed.TextSize = unit.Sp(th.Fonts.Composer.Size)
+				}
+				return ed.Layout(gtx)
+			})
 		})
 	})
 }

@@ -92,22 +92,22 @@ func (l *LinkPicker) Layout(gtx layout.Context, th *Theme) layout.Dimensions {
 	}
 	return paintedBg(gtx, th.Pal.Bg, func(gtx layout.Context) layout.Dimensions {
 		return layout.Inset{
-			Top:    unit.Dp(12),
-			Bottom: unit.Dp(12),
-			Left:   unit.Dp(16),
-			Right:  unit.Dp(16),
+			Top:    unit.Dp(16),
+			Bottom: unit.Dp(16),
+			Left:   unit.Dp(20),
+			Right:  unit.Dp(20),
 		}.Layout(gtx, func(gtx layout.Context) layout.Dimensions {
 			return layout.Flex{Axis: layout.Vertical}.Layout(gtx,
 				layout.Rigid(func(gtx layout.Context) layout.Dimensions {
 					title := material.Subtitle1(th.Mat, "Open link")
-					title.Color = th.Pal.Text
-					title.Font.Weight = font.Bold
+					title.Color = th.Pal.TextStrong
+					title.Font.Weight = font.SemiBold
 					return title.Layout(gtx)
 				}),
 				layout.Rigid(func(gtx layout.Context) layout.Dimensions {
 					hint := material.Caption(th.Mat, "j/k or ↑/↓ select · Enter open · Esc cancel")
-					hint.Color = th.Pal.TextDim
-					return layout.Inset{Top: unit.Dp(2), Bottom: unit.Dp(8)}.Layout(gtx, hint.Layout)
+					hint.Color = th.Pal.TextMuted
+					return layout.Inset{Top: unit.Dp(4), Bottom: unit.Dp(12)}.Layout(gtx, hint.Layout)
 				}),
 				layout.Flexed(1, func(gtx layout.Context) layout.Dimensions {
 					return material.List(th.Mat, &l.list).Layout(gtx, len(l.rows), func(gtx layout.Context, idx int) layout.Dimensions {
@@ -124,24 +124,30 @@ func (l *LinkPicker) layoutRow(gtx layout.Context, th *Theme, idx int, r *linkRo
 	bg := th.Pal.Bg
 	color := th.Pal.Link
 	if active {
-		bg = th.Pal.Accent
-		color = th.Pal.AccentText
+		bg = th.Pal.BgRowAlt
+		color = th.Pal.TextStrong
 	}
-	return r.click.Layout(gtx, func(gtx layout.Context) layout.Dimensions {
+	row := func(gtx layout.Context) layout.Dimensions {
 		return paintedBg(gtx, bg, func(gtx layout.Context) layout.Dimensions {
 			return layout.Inset{
-				Top:    unit.Dp(6),
-				Bottom: unit.Dp(6),
-				Left:   unit.Dp(10),
-				Right:  unit.Dp(10),
+				Top:    unit.Dp(7),
+				Bottom: unit.Dp(7),
+				Left:   unit.Dp(12),
+				Right:  unit.Dp(12),
 			}.Layout(gtx, func(gtx layout.Context) layout.Dimensions {
 				lbl := material.Body2(th.Mat, fmt.Sprintf("%d. %s", idx+1, r.url))
 				lbl.Color = color
 				if active {
-					lbl.Font.Weight = font.Bold
+					lbl.Font.Weight = font.SemiBold
 				}
 				return lbl.Layout(gtx)
 			})
 		})
+	}
+	return r.click.Layout(gtx, func(gtx layout.Context) layout.Dimensions {
+		if active {
+			return withBorder(gtx, th.Pal.Accent, borders{Left: true}, row)
+		}
+		return row(gtx)
 	})
 }

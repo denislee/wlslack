@@ -133,31 +133,33 @@ func (r *ReactionPicker) Layout(gtx layout.Context, th *Theme) layout.Dimensions
 
 	return paintedBg(gtx, th.Pal.Bg, func(gtx layout.Context) layout.Dimensions {
 		return layout.Inset{
-			Top:    unit.Dp(12),
-			Bottom: unit.Dp(12),
-			Left:   unit.Dp(16),
-			Right:  unit.Dp(16),
+			Top:    unit.Dp(16),
+			Bottom: unit.Dp(16),
+			Left:   unit.Dp(20),
+			Right:  unit.Dp(20),
 		}.Layout(gtx, func(gtx layout.Context) layout.Dimensions {
 			return layout.Flex{Axis: layout.Vertical}.Layout(gtx,
 				layout.Rigid(func(gtx layout.Context) layout.Dimensions {
 					title := material.Subtitle1(th.Mat, "Add reaction")
-					title.Color = th.Pal.Text
-					title.Font.Weight = font.Bold
+					title.Color = th.Pal.TextStrong
+					title.Font.Weight = font.SemiBold
 					return title.Layout(gtx)
 				}),
 				layout.Rigid(func(gtx layout.Context) layout.Dimensions {
 					hint := material.Caption(th.Mat, "type to filter · ↑/↓ select · Enter react · Esc cancel")
-					hint.Color = th.Pal.TextDim
-					return layout.Inset{Top: unit.Dp(2), Bottom: unit.Dp(8)}.Layout(gtx, hint.Layout)
+					hint.Color = th.Pal.TextMuted
+					return layout.Inset{Top: unit.Dp(4), Bottom: unit.Dp(12)}.Layout(gtx, hint.Layout)
 				}),
 				layout.Rigid(func(gtx layout.Context) layout.Dimensions {
-					return paintedBg(gtx, th.Pal.BgComposer, func(gtx layout.Context) layout.Dimensions {
-						return layout.UniformInset(unit.Dp(10)).Layout(gtx, func(gtx layout.Context) layout.Dimensions {
-							ed := material.Editor(th.Mat, &r.editor, "Search emoji…")
-							ed.Color = th.Pal.Text
-							ed.HintColor = th.Pal.TextDim
-							ed.SelectionColor = withAlpha(th.Pal.Selection, 0x66)
-							return ed.Layout(gtx)
+					return withBorder(gtx, th.Pal.BorderStrong, borders{Top: true, Right: true, Bottom: true, Left: true}, func(gtx layout.Context) layout.Dimensions {
+						return paintedBg(gtx, th.Pal.BgCode, func(gtx layout.Context) layout.Dimensions {
+							return layout.UniformInset(unit.Dp(10)).Layout(gtx, func(gtx layout.Context) layout.Dimensions {
+								ed := material.Editor(th.Mat, &r.editor, "Search emoji…")
+								ed.Color = th.Pal.TextStrong
+								ed.HintColor = th.Pal.TextMuted
+								ed.SelectionColor = withAlpha(th.Pal.Selection, 0x66)
+								return ed.Layout(gtx)
+							})
 						})
 					})
 				}),
@@ -177,24 +179,30 @@ func (r *ReactionPicker) layoutRow(gtx layout.Context, th *Theme, idx int, row *
 	bg := th.Pal.Bg
 	color := th.Pal.Text
 	if active {
-		bg = th.Pal.Accent
-		color = th.Pal.AccentText
+		bg = th.Pal.BgRowAlt
+		color = th.Pal.TextStrong
 	}
-	return row.click.Layout(gtx, func(gtx layout.Context) layout.Dimensions {
+	rowFn := func(gtx layout.Context) layout.Dimensions {
 		return paintedBg(gtx, bg, func(gtx layout.Context) layout.Dimensions {
 			return layout.Inset{
-				Top:    unit.Dp(6),
-				Bottom: unit.Dp(6),
-				Left:   unit.Dp(10),
-				Right:  unit.Dp(10),
+				Top:    unit.Dp(7),
+				Bottom: unit.Dp(7),
+				Left:   unit.Dp(12),
+				Right:  unit.Dp(12),
 			}.Layout(gtx, func(gtx layout.Context) layout.Dimensions {
 				lbl := material.Body1(th.Mat, row.entry.Glyph+"  :"+row.entry.Name+":")
 				lbl.Color = color
 				if active {
-					lbl.Font.Weight = font.Bold
+					lbl.Font.Weight = font.SemiBold
 				}
 				return lbl.Layout(gtx)
 			})
 		})
+	}
+	return row.click.Layout(gtx, func(gtx layout.Context) layout.Dimensions {
+		if active {
+			return withBorder(gtx, th.Pal.Accent, borders{Left: true}, rowFn)
+		}
+		return rowFn(gtx)
 	})
 }

@@ -45,6 +45,7 @@ type App struct {
 	linkPicker     *LinkPicker
 	imageViewer    *ImageViewer
 	reactionPicker *ReactionPicker
+	settings       *SettingsScreen
 
 	mu          sync.Mutex
 	channelList []slack.Channel
@@ -62,6 +63,7 @@ type App struct {
 	linkPickerOpen      bool
 	imageViewerOpen     bool
 	reactionPickerOpen  bool
+	settingsOpen        bool
 
 	// Channel + timestamp captured when the reaction picker opens, so the
 	// emoji selection still targets the right message even if the chat view
@@ -109,6 +111,8 @@ func Run(client *slack.Client, cfg *config.Config) error {
 	images := slack.NewImageLoader(cfg.Token, cfg.Cookie, w.Invalidate)
 	a.channels = newChannelsSidebar(a.onChannelSelect)
 	state := config.LoadUIState()
+	a.th.ApplyFontPrefs(prefsFromState(state.Fonts))
+	a.th.ApplyThemePrefs(state.ThemeSidebar, state.ThemeMain)
 	a.channels.SetFavorites(state.Favorites, a.onFavoritesChanged)
 	a.channels.SetCollapsedGroups(state.CollapsedGroups, a.onCollapsedGroupsChanged)
 	a.messages = newMessagesView(images)
@@ -118,6 +122,7 @@ func Run(client *slack.Client, cfg *config.Config) error {
 	a.imageViewer = newImageViewer(images)
 	a.reactionPicker = newReactionPicker(a.onReactionPickerSelect)
 	a.reactionPicker.SetEmojis(a.fmt.EmojiCatalog())
+	a.settings = newSettingsScreen(a.th, a.onFontsChanged, a.closeSettings)
 
 	go a.pollChannels()
 	go a.pollActiveChannel()
@@ -151,6 +156,9 @@ func (a *App) layout(gtx layout.Context) layout.Dimensions {
 			return a.channels.Layout(gtx, a.th)
 		}),
 		layout.Flexed(1, func(gtx layout.Context) layout.Dimensions {
+			if a.settingsOpen {
+				return a.settings.Layout(gtx)
+			}
 			if a.switcherOpen {
 				return a.switcher.Layout(gtx, a.th)
 			}
@@ -283,6 +291,7 @@ func (a *App) handleKeys(gtx layout.Context) {
 			key.Filter{Name: "F"},
 			key.Filter{Name: "F", Required: key.ModCtrl},
 			key.Filter{Name: "B", Required: key.ModCtrl},
+			key.Filter{Name: ","},
 			key.Filter{Name: key.NameReturn},
 			key.Filter{Name: key.NameSpace},
 		)
@@ -294,6 +303,12 @@ func (a *App) handleKeys(gtx layout.Context) {
 				key.Filter{Name: key.NameDownArrow},
 				key.Filter{Name: key.NameLeftArrow},
 				key.Filter{Name: key.NameRightArrow},
+			)
+		}
+		if a.settingsOpen {
+			filters = append(filters,
+				key.Filter{Name: key.NameEscape},
+				key.Filter{Name: "[", Required: key.ModCtrl},
 			)
 		}
 	}
@@ -316,6 +331,8 @@ func (a *App) handleKeys(gtx layout.Context) {
 			}
 		case kev.Name == key.NameEscape || (kev.Name == "[" && kev.Modifiers.Contain(key.ModCtrl)):
 			switch {
+			case a.settingsOpen:
+				a.closeSettings()
 			case a.switcherOpen:
 				a.closeSwitcher()
 			case a.reactionPickerOpen:
@@ -449,6 +466,12 @@ func (a *App) handleKeys(gtx layout.Context) {
 			a.composerWasFocused = false
 			gtx.Execute(key.FocusCmd{Tag: &a.composer.editor})
 			a.w.Invalidate()
+		case kev.Name == ",":
+			if a.settingsOpen {
+				a.closeSettings()
+			} else {
+				a.openSettings()
+			}
 		case kev.Name == "Q":
 			if a.imageViewerOpen {
 				a.closeImageViewer()
@@ -647,6 +670,53 @@ func (a *App) onCollapsedGroupsChanged(keys []string) {
 	state := config.LoadUIState()
 	state.CollapsedGroups = keys
 	config.SaveUIState(state)
+}
+
+func (a *App) openSettings() {
+	a.settingsOpen = true
+	a.w.Invalidate()
+}
+
+func (a *App) closeSettings() {
+	a.settingsOpen = false
+	a.pendFocusKeyTag = true
+	a.w.Invalidate()
+}
+
+// onFontsChanged is fired by the SettingsScreen on every face/size mutation so
+// we can redraw and persist immediately. Disk write is cheap; we do it inline
+// for simplicity.
+func (a *App) onFontsChanged() {
+	state := config.LoadUIState()
+	state.Fonts = stateFromTheme(a.th)
+	state.ThemeSidebar = a.th.ThemeSidebar
+	state.ThemeMain = a.th.ThemeMain
+	config.SaveUIState(state)
+	a.w.Invalidate()
+}
+
+// prefsFromState bridges config.FontPrefs → ui sectionPrefs without making
+// the ui package import a runtime dependency on the JSON struct shape.
+func prefsFromState(p config.FontPrefs) sectionPrefs {
+	conv := func(f config.FontPref) FontStyle { return FontStyle{Face: f.Face, Size: f.Size} }
+	return sectionPrefs{
+		Channels: conv(p.Channels),
+		Header:   conv(p.Header),
+		Messages: conv(p.Messages),
+		Composer: conv(p.Composer),
+		Code:     conv(p.Code),
+	}
+}
+
+func stateFromTheme(th *Theme) config.FontPrefs {
+	conv := func(f FontStyle) config.FontPref { return config.FontPref{Face: f.Face, Size: f.Size} }
+	return config.FontPrefs{
+		Channels: conv(th.Fonts.Channels),
+		Header:   conv(th.Fonts.Header),
+		Messages: conv(th.Fonts.Messages),
+		Composer: conv(th.Fonts.Composer),
+		Code:     conv(th.Fonts.Code),
+	}
 }
 
 // moveInPane dispatches j/k to whichever pane has logical focus. The author

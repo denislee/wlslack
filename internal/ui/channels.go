@@ -2,7 +2,9 @@ package ui
 
 import (
 	"fmt"
+	"image/color"
 	"sort"
+	"strings"
 
 	"gioui.org/font"
 	"gioui.org/layout"
@@ -338,10 +340,10 @@ func (s *ChannelsSidebar) rebuildRows() {
 		items  []slack.Channel
 		fav    bool
 	}{
-		{"● Unread", unread, false},
-		{"★ Favorites", favs, true},
+		{"Unread", unread, false},
+		{"Favorites", favs, true},
 		{"Channels", channels, false},
-		{"External channels", externals, false},
+		{"External", externals, false},
 		{"Direct messages", dms, false},
 		{"Group messages", mpdms, false},
 	}
@@ -412,40 +414,46 @@ func (s *ChannelsSidebar) Layout(gtx layout.Context, th *Theme) layout.Dimension
 		}
 	}
 
-	return paintedBg(gtx, th.Pal.BgSidebar, func(gtx layout.Context) layout.Dimensions {
-		return material.List(th.Mat, &s.list).Layout(gtx, len(s.rows), func(gtx layout.Context, idx int) layout.Dimensions {
-			r := s.rows[idx]
-			if r.kind == rowHeader {
-				return s.layoutHeader(gtx, th, r)
-			}
-			return s.layoutRow(gtx, th, r)
+	return withBorder(gtx, th.SidebarPal.Border, borders{Right: true}, func(gtx layout.Context) layout.Dimensions {
+		return paintedBg(gtx, th.SidebarPal.BgSidebar, func(gtx layout.Context) layout.Dimensions {
+			return material.List(th.Mat, &s.list).Layout(gtx, len(s.rows), func(gtx layout.Context, idx int) layout.Dimensions {
+				r := s.rows[idx]
+				if r.kind == rowHeader {
+					return s.layoutHeader(gtx, th, r)
+				}
+				return s.layoutRow(gtx, th, r)
+			})
 		})
 	})
 }
 
 func (s *ChannelsSidebar) layoutHeader(gtx layout.Context, th *Theme, r *sidebarRow) layout.Dimensions {
-	chevron := "▼ "
+	chevron := "▾ "
 	if r.collapsed {
-		chevron = "▶ "
+		chevron = "▸ "
 	}
 	selected := s.cursorKey == headerKey(r.headerKey)
-	bg := th.Pal.BgSidebar
-	color := th.Pal.TextDim
+	bg := th.SidebarPal.BgSidebar
+	textColor := th.SidebarPal.TextMuted
 	if selected {
-		bg = th.Pal.Accent
-		color = th.Pal.AccentText
+		bg = th.SidebarPal.BgRowAlt
+		textColor = th.SidebarPal.TextDim
 	}
 	return r.click.Layout(gtx, func(gtx layout.Context) layout.Dimensions {
 		return paintedBg(gtx, bg, func(gtx layout.Context) layout.Dimensions {
 			return layout.Inset{
-				Top:    unit.Dp(8),
-				Bottom: unit.Dp(2),
-				Left:   unit.Dp(10),
-				Right:  unit.Dp(10),
+				Top:    unit.Dp(14),
+				Bottom: unit.Dp(4),
+				Left:   unit.Dp(12),
+				Right:  unit.Dp(12),
 			}.Layout(gtx, func(gtx layout.Context) layout.Dimensions {
-				lbl := material.Caption(th.Mat, chevron+r.header)
-				lbl.Color = color
-				lbl.Font.Weight = font.Bold
+				lbl := material.Caption(th.Mat, chevron+strings.ToUpper(r.header))
+				lbl.Color = textColor
+				lbl.Font.Weight = font.SemiBold
+				lbl.TextSize = unit.Sp(11)
+				if th.Fonts.Channels.Face != "" {
+					lbl.Font.Typeface = font.Typeface(th.Fonts.Channels.Face)
+				}
 				return lbl.Layout(gtx)
 			})
 		})
@@ -454,15 +462,20 @@ func (s *ChannelsSidebar) layoutHeader(gtx layout.Context, th *Theme, r *sidebar
 
 func (s *ChannelsSidebar) layoutRow(gtx layout.Context, th *Theme, r *sidebarRow) layout.Dimensions {
 	active := r.channel.ID == s.activeID
-	bg := th.Pal.BgSidebar
-	textColor := th.Pal.Text
-	if active {
-		bg = th.Pal.Accent
-		textColor = th.Pal.AccentText
-	} else if r.channel.UnreadCount > 0 {
-		textColor = th.Pal.AccentText
-	} else if r.channel.LatestTS == "" {
-		textColor = th.Pal.TextDim
+	hasUnread := r.channel.UnreadCount > 0
+
+	bg := th.SidebarPal.BgSidebar
+	textColor := th.SidebarPal.Text
+	leftBorder := borders{}
+	switch {
+	case active:
+		bg = th.SidebarPal.BgRowAlt
+		textColor = th.SidebarPal.TextStrong
+		leftBorder = borders{Left: true}
+	case hasUnread:
+		textColor = th.SidebarPal.TextStrong
+	case r.channel.LatestTS == "":
+		textColor = th.SidebarPal.TextMuted
 	}
 
 	prefix := channelPrefix(r.channel)
@@ -472,43 +485,64 @@ func (s *ChannelsSidebar) layoutRow(gtx layout.Context, th *Theme, r *sidebarRow
 	}
 
 	return r.click.Layout(gtx, func(gtx layout.Context) layout.Dimensions {
-		return paintedBg(gtx, bg, func(gtx layout.Context) layout.Dimensions {
-			return layout.Inset{
-				Top:    unit.Dp(4),
-				Bottom: unit.Dp(4),
-				Left:   unit.Dp(10),
-				Right:  unit.Dp(10),
-			}.Layout(gtx, func(gtx layout.Context) layout.Dimensions {
-				return layout.Flex{Alignment: layout.Middle}.Layout(gtx,
-					layout.Rigid(func(gtx layout.Context) layout.Dimensions {
-						lbl := material.Body1(th.Mat, prefix)
-						lbl.Color = th.Pal.TextDim
-						if active {
-							lbl.Color = th.Pal.AccentText
-						}
-						return lbl.Layout(gtx)
-					}),
-					layout.Flexed(1, func(gtx layout.Context) layout.Dimensions {
-						lbl := material.Body1(th.Mat, name)
-						lbl.Color = textColor
-						if r.channel.UnreadCount > 0 && !active {
-							lbl.Font.Weight = th.BoldF.Weight
-						}
-						return lbl.Layout(gtx)
-					}),
-					layout.Rigid(func(gtx layout.Context) layout.Dimensions {
-						if r.channel.UnreadCount <= 0 {
-							return layout.Dimensions{}
-						}
-						lbl := material.Caption(th.Mat, fmt.Sprintf(" %d", r.channel.UnreadCount))
-						lbl.Color = th.Pal.Unread
-						if active {
-							lbl.Color = th.Pal.AccentText
-						}
-						return lbl.Layout(gtx)
-					}),
-				)
-			})
+		drawAccentStripe := func(gtx layout.Context) layout.Dimensions {
+			if leftBorder.Left {
+				return withBorder(gtx, th.SidebarPal.Accent, leftBorder, func(gtx layout.Context) layout.Dimensions {
+					return s.layoutRowInner(gtx, th, r, prefix, name, textColor, hasUnread, active, bg)
+				})
+			}
+			return s.layoutRowInner(gtx, th, r, prefix, name, textColor, hasUnread, active, bg)
+		}
+		return drawAccentStripe(gtx)
+	})
+}
+
+func (s *ChannelsSidebar) layoutRowInner(
+	gtx layout.Context,
+	th *Theme,
+	r *sidebarRow,
+	prefix, name string,
+	textColor color.NRGBA,
+	hasUnread, active bool,
+	bg color.NRGBA,
+) layout.Dimensions {
+	return paintedBg(gtx, bg, func(gtx layout.Context) layout.Dimensions {
+		return layout.Inset{
+			Top:    unit.Dp(5),
+			Bottom: unit.Dp(5),
+			Left:   unit.Dp(12),
+			Right:  unit.Dp(12),
+		}.Layout(gtx, func(gtx layout.Context) layout.Dimensions {
+			return layout.Flex{Alignment: layout.Middle}.Layout(gtx,
+				layout.Rigid(func(gtx layout.Context) layout.Dimensions {
+					lbl := material.Body1(th.Mat, prefix)
+					lbl.Color = th.SidebarPal.TextMuted
+					if active {
+						lbl.Color = th.SidebarPal.TextDim
+					}
+					th.applyFont(&lbl, th.Fonts.Channels)
+					return lbl.Layout(gtx)
+				}),
+				layout.Flexed(1, func(gtx layout.Context) layout.Dimensions {
+					lbl := material.Body1(th.Mat, name)
+					lbl.Color = textColor
+					if hasUnread || active {
+						lbl.Font.Weight = font.Bold
+					}
+					th.applyFont(&lbl, th.Fonts.Channels)
+					return lbl.Layout(gtx)
+				}),
+				layout.Rigid(func(gtx layout.Context) layout.Dimensions {
+					if !hasUnread {
+						return layout.Dimensions{}
+					}
+					lbl := material.Caption(th.Mat, fmt.Sprintf("%d", r.channel.UnreadCount))
+					lbl.Color = th.SidebarPal.Unread
+					lbl.Font.Weight = font.SemiBold
+					th.applyFont(&lbl, th.Fonts.Channels)
+					return lbl.Layout(gtx)
+				}),
+			)
 		})
 	})
 }

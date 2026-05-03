@@ -134,20 +134,23 @@ func (q *QuickSwitcher) Layout(gtx layout.Context, th *Theme) layout.Dimensions 
 
 	return paintedBg(gtx, th.Pal.Bg, func(gtx layout.Context) layout.Dimensions {
 		return layout.Inset{
-			Top:    unit.Dp(12),
-			Bottom: unit.Dp(12),
-			Left:   unit.Dp(16),
-			Right:  unit.Dp(16),
+			Top:    unit.Dp(16),
+			Bottom: unit.Dp(16),
+			Left:   unit.Dp(20),
+			Right:  unit.Dp(20),
 		}.Layout(gtx, func(gtx layout.Context) layout.Dimensions {
 			return layout.Flex{Axis: layout.Vertical}.Layout(gtx,
 				layout.Rigid(func(gtx layout.Context) layout.Dimensions {
-					return paintedBg(gtx, th.Pal.BgComposer, func(gtx layout.Context) layout.Dimensions {
-						return layout.UniformInset(unit.Dp(10)).Layout(gtx, func(gtx layout.Context) layout.Dimensions {
-							ed := material.Editor(th.Mat, &q.editor, "Jump to channel or DM…")
-							ed.Color = th.Pal.Text
-							ed.HintColor = th.Pal.TextDim
-							ed.SelectionColor = withAlpha(th.Pal.Selection, 0x66)
-							return ed.Layout(gtx)
+					return withBorder(gtx, th.Pal.BorderStrong, borders{Top: true, Right: true, Bottom: true, Left: true}, func(gtx layout.Context) layout.Dimensions {
+						return paintedBg(gtx, th.Pal.BgCode, func(gtx layout.Context) layout.Dimensions {
+							return layout.UniformInset(unit.Dp(10)).Layout(gtx, func(gtx layout.Context) layout.Dimensions {
+								ed := material.Editor(th.Mat, &q.editor, "Jump to channel or DM…")
+								ed.Color = th.Pal.TextStrong
+								ed.HintColor = th.Pal.TextMuted
+								ed.SelectionColor = withAlpha(th.Pal.Selection, 0x66)
+								th.applyEditorFont(&ed, th.Fonts.Search)
+								return ed.Layout(gtx)
+							})
 						})
 					})
 				}),
@@ -167,16 +170,16 @@ func (q *QuickSwitcher) layoutRow(gtx layout.Context, th *Theme, idx int, r *swi
 	bg := th.Pal.Bg
 	color := th.Pal.Text
 	if active {
-		bg = th.Pal.Accent
-		color = th.Pal.AccentText
+		bg = th.Pal.BgRowAlt
+		color = th.Pal.TextStrong
 	}
-	return r.click.Layout(gtx, func(gtx layout.Context) layout.Dimensions {
+	row := func(gtx layout.Context) layout.Dimensions {
 		return paintedBg(gtx, bg, func(gtx layout.Context) layout.Dimensions {
 			return layout.Inset{
-				Top:    unit.Dp(6),
-				Bottom: unit.Dp(6),
-				Left:   unit.Dp(10),
-				Right:  unit.Dp(10),
+				Top:    unit.Dp(7),
+				Bottom: unit.Dp(7),
+				Left:   unit.Dp(12),
+				Right:  unit.Dp(12),
 			}.Layout(gtx, func(gtx layout.Context) layout.Dimensions {
 				name := r.channel.Name
 				if name == "" {
@@ -185,10 +188,17 @@ func (q *QuickSwitcher) layoutRow(gtx layout.Context, th *Theme, idx int, r *swi
 				lbl := material.Body1(th.Mat, channelPrefix(r.channel)+name)
 				lbl.Color = color
 				if active {
-					lbl.Font.Weight = font.Bold
+					lbl.Font.Weight = font.SemiBold
 				}
+				th.applyFont(&lbl, th.Fonts.Search)
 				return lbl.Layout(gtx)
 			})
 		})
+	}
+	return r.click.Layout(gtx, func(gtx layout.Context) layout.Dimensions {
+		if active {
+			return withBorder(gtx, th.Pal.Accent, borders{Left: true}, row)
+		}
+		return row(gtx)
 	})
 }

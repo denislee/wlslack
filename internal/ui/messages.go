@@ -519,12 +519,13 @@ func (m *MessagesView) layoutMessages(gtx layout.Context, th *Theme, fmt *slack.
 }
 
 func (m *MessagesView) layoutAuthor(gtx layout.Context, th *Theme) layout.Dimensions {
+	return withBorder(gtx, th.Pal.Border, borders{Left: true}, func(gtx layout.Context) layout.Dimensions {
 	return paintedBg(gtx, th.Pal.BgSidebar, func(gtx layout.Context) layout.Dimensions {
 		return layout.Inset{
-			Top:    unit.Dp(10),
-			Bottom: unit.Dp(10),
-			Left:   unit.Dp(12),
-			Right:  unit.Dp(12),
+			Top:    unit.Dp(14),
+			Bottom: unit.Dp(14),
+			Left:   unit.Dp(16),
+			Right:  unit.Dp(16),
 		}.Layout(gtx, func(gtx layout.Context) layout.Dimensions {
 			children := make([]layout.FlexChild, 0, len(m.authorRows)+5)
 			children = append(children, layout.Rigid(func(gtx layout.Context) layout.Dimensions {
@@ -545,6 +546,7 @@ func (m *MessagesView) layoutAuthor(gtx layout.Context, th *Theme) layout.Dimens
 			}))
 			return layout.Flex{Axis: layout.Vertical}.Layout(gtx, children...)
 		})
+	})
 	})
 }
 
@@ -631,29 +633,35 @@ func (m *MessagesView) layoutHeader(gtx layout.Context, th *Theme) layout.Dimens
 		title = "↳ Thread in #" + m.header
 		subtitle = "press h to return to #" + m.header
 	}
-	return paintedBg(gtx, th.Pal.BgHeader, func(gtx layout.Context) layout.Dimensions {
-		return layout.Inset{
-			Top:    unit.Dp(8),
-			Bottom: unit.Dp(8),
-			Left:   unit.Dp(14),
-			Right:  unit.Dp(14),
-		}.Layout(gtx, func(gtx layout.Context) layout.Dimensions {
-			return layout.Flex{Axis: layout.Vertical}.Layout(gtx,
-				layout.Rigid(func(gtx layout.Context) layout.Dimensions {
-					lbl := material.Subtitle1(th.Mat, title)
-					lbl.Color = th.Pal.Text
-					lbl.Font.Weight = font.Bold
-					return lbl.Layout(gtx)
-				}),
-				layout.Rigid(func(gtx layout.Context) layout.Dimensions {
-					if subtitle == "" {
-						return layout.Dimensions{}
-					}
-					lbl := material.Caption(th.Mat, subtitle)
-					lbl.Color = th.Pal.TextDim
-					return lbl.Layout(gtx)
-				}),
-			)
+	return withBorder(gtx, th.Pal.Border, borders{Bottom: true}, func(gtx layout.Context) layout.Dimensions {
+		return paintedBg(gtx, th.Pal.BgHeader, func(gtx layout.Context) layout.Dimensions {
+			return layout.Inset{
+				Top:    unit.Dp(10),
+				Bottom: unit.Dp(10),
+				Left:   unit.Dp(16),
+				Right:  unit.Dp(16),
+			}.Layout(gtx, func(gtx layout.Context) layout.Dimensions {
+				return layout.Flex{Axis: layout.Vertical}.Layout(gtx,
+					layout.Rigid(func(gtx layout.Context) layout.Dimensions {
+						lbl := material.Subtitle1(th.Mat, title)
+						lbl.Color = th.Pal.TextStrong
+						lbl.Font.Weight = font.SemiBold
+						th.applyFont(&lbl, th.Fonts.Header)
+						return lbl.Layout(gtx)
+					}),
+					layout.Rigid(func(gtx layout.Context) layout.Dimensions {
+						if subtitle == "" {
+							return layout.Dimensions{}
+						}
+						return layout.Inset{Top: unit.Dp(2)}.Layout(gtx, func(gtx layout.Context) layout.Dimensions {
+							lbl := material.Caption(th.Mat, subtitle)
+							lbl.Color = th.Pal.TextDim
+							th.applyFont(&lbl, th.Fonts.Header)
+							return lbl.Layout(gtx)
+						})
+					}),
+				)
+			})
 		})
 	})
 }
@@ -663,16 +671,18 @@ func (m *MessagesView) layoutRow(gtx layout.Context, th *Theme, fmt *slack.Forma
 	if m.threadActive {
 		selected = m.threadSelected
 	}
+	isSelected := m.focused && idx == selected
 	bg := th.Pal.Bg
-	if m.focused && idx == selected {
-		bg = withAlpha(th.Pal.Selection, 0x40)
+	if isSelected {
+		bg = th.Pal.BgRowAlt
 	}
-	return paintedBg(gtx, bg, func(gtx layout.Context) layout.Dimensions {
-		return layout.Inset{
-		Top:    unit.Dp(7),
-		Bottom: unit.Dp(7),
-		Left:   unit.Dp(14),
-		Right:  unit.Dp(14),
+	row := func(gtx layout.Context) layout.Dimensions {
+		return paintedBg(gtx, bg, func(gtx layout.Context) layout.Dimensions {
+			return layout.Inset{
+		Top:    unit.Dp(8),
+		Bottom: unit.Dp(8),
+		Left:   unit.Dp(16),
+		Right:  unit.Dp(16),
 	}.Layout(gtx, func(gtx layout.Context) layout.Dimensions {
 		return layout.Flex{Axis: layout.Vertical}.Layout(gtx,
 			// Header line: username + time
@@ -708,14 +718,16 @@ func (m *MessagesView) layoutRow(gtx layout.Context, th *Theme, fmt *slack.Forma
 							name = r.msg.UserID
 						}
 						lbl := material.Body1(th.Mat, name)
-						lbl.Font.Weight = font.Bold
-						lbl.Color = th.Pal.Text
+						lbl.Font.Weight = font.SemiBold
+						lbl.Color = th.Pal.TextStrong
+						th.applyFont(&lbl, th.Fonts.Messages)
 						return lbl.Layout(gtx)
 					}),
 					layout.Rigid(layout.Spacer{Width: unit.Dp(8)}.Layout),
 					layout.Rigid(func(gtx layout.Context) layout.Dimensions {
 						lbl := material.Caption(th.Mat, fmt.FormatTimeOnly(r.msg.Timestamp))
-						lbl.Color = th.Pal.TextDim
+						lbl.Color = th.Pal.TextMuted
+						th.applyFont(&lbl, th.Fonts.Messages)
 						return lbl.Layout(gtx)
 					}),
 				)
@@ -748,6 +760,11 @@ func (m *MessagesView) layoutRow(gtx layout.Context, th *Theme, fmt *slack.Forma
 		)
 	})
 	})
+	}
+	if isSelected {
+		return withBorder(gtx, th.Pal.Accent, borders{Left: true}, row)
+	}
+	return row(gtx)
 }
 
 func (m *MessagesView) layoutBody(gtx layout.Context, th *Theme, fm *slack.Formatter, r *messageRow) layout.Dimensions {
@@ -876,12 +893,15 @@ func (m *MessagesView) layoutReactions(gtx layout.Context, th *Theme, fm *slack.
 }
 
 func (m *MessagesView) layoutReactionChip(gtx layout.Context, th *Theme, fm *slack.Formatter, r slack.Reaction) layout.Dimensions {
-	bg := withAlpha(th.Pal.BgCode, 0xff)
+	bg := th.Pal.BgCode
 	textColor := th.Pal.Text
+	borderColor := th.Pal.Border
 	if r.HasMe {
-		bg = withAlpha(th.Pal.Accent, 0x55)
-		textColor = th.Pal.AccentText
+		bg = withAlpha(th.Pal.Accent, 0x33)
+		textColor = th.Pal.TextStrong
+		borderColor = withAlpha(th.Pal.Accent, 0x88)
 	}
+	return withBorder(gtx, borderColor, borders{Top: true, Right: true, Bottom: true, Left: true}, func(gtx layout.Context) layout.Dimensions {
 	return paintedBg(gtx, bg, func(gtx layout.Context) layout.Dimensions {
 		return layout.Inset{
 			Top:    unit.Dp(2),
@@ -909,15 +929,18 @@ func (m *MessagesView) layoutReactionChip(gtx layout.Context, th *Theme, fm *sla
 			)
 		})
 	})
+	})
 }
 
 // toRichSpan converts a backend Span to a Gio richtext SpanStyle, applying
 // the current theme's palette and font choices.
 func toRichSpan(s slack.Span, th *Theme) richtext.SpanStyle {
+	bodyFont, bodySize := th.FontFor(th.Fonts.Messages)
 	out := richtext.SpanStyle{
 		Content: s.Text,
 		Color:   th.Pal.Text,
-		Size:    th.Mat.TextSize,
+		Size:    bodySize,
+		Font:    bodyFont,
 	}
 	if s.Style&slack.StyleBold != 0 {
 		out.Font.Weight = font.Bold
@@ -931,7 +954,14 @@ func toRichSpan(s slack.Span, th *Theme) richtext.SpanStyle {
 		out.Color = th.Pal.TextDim
 	}
 	if s.Style&(slack.StyleCode|slack.StyleCodeBlock) != 0 {
-		out.Font.Typeface = "Go Mono"
+		codeFace := th.Fonts.Code.Face
+		if codeFace == "" {
+			codeFace = string(th.MonoF.Typeface)
+		}
+		out.Font.Typeface = font.Typeface(codeFace)
+		if th.Fonts.Code.Size > 0 {
+			out.Size = unit.Sp(th.Fonts.Code.Size)
+		}
 		out.Color = lighten(th.Pal.Text)
 	}
 	if s.Style&slack.StyleLink != 0 {

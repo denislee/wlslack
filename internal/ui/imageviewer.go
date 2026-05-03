@@ -131,13 +131,13 @@ func (v *ImageViewer) layoutFooter(gtx layout.Context, th *Theme, f slack.File) 
 	return layout.Flex{Axis: layout.Vertical, Alignment: layout.Middle}.Layout(gtx,
 		layout.Rigid(func(gtx layout.Context) layout.Dimensions {
 			lbl := material.Body2(th.Mat, caption)
-			lbl.Color = th.Pal.Text
+			lbl.Color = th.Pal.TextStrong
 			lbl.Font.Weight = font.Medium
 			return lbl.Layout(gtx)
 		}),
 		layout.Rigid(func(gtx layout.Context) layout.Dimensions {
 			lbl := material.Caption(th.Mat, hint)
-			lbl.Color = th.Pal.TextDim
+			lbl.Color = th.Pal.TextMuted
 			return lbl.Layout(gtx)
 		}),
 	)
