@@ -3,6 +3,7 @@ package ui
 import (
 	"fmt"
 	"image/color"
+	"log/slog"
 	"sort"
 	"strings"
 
@@ -43,6 +44,9 @@ type ChannelsSidebar struct {
 	// raw retains the most recent unsorted channel set so we can re-group when
 	// favorites change without waiting for the next poll.
 	raw []slack.Channel
+
+	showOnlyRecent bool
+	hideEmpty      bool
 }
 
 type rowKind int
@@ -295,10 +299,18 @@ func (s *ChannelsSidebar) rebuildRows() {
 	// in one group — being unread takes priority over its category.
 	var unread, favs, channels, externals, dms, mpdms []slack.Channel
 	for _, ch := range s.raw {
+		isFav := s.favorites[ch.ID]
+		if s.hideEmpty && ch.LatestTSVerified && ch.LatestTS == "" && ch.UnreadCount == 0 && !isFav && !ch.IsIM && !ch.IsMPIM {
+			slog.Debug("sidebar: filtering verified empty channel", "id", ch.ID, "name", ch.Name, "unread", ch.UnreadCount, "latest", ch.LatestTS)
+			continue
+		}
+		if s.hideEmpty && !isFav && !ch.IsIM && !ch.IsMPIM {
+			slog.Debug("sidebar: keeping channel", "id", ch.ID, "name", ch.Name, "unread", ch.UnreadCount, "latest", ch.LatestTS, "verified", ch.LatestTSVerified)
+		}
 		switch {
 		case ch.UnreadCount > 0:
 			unread = append(unread, ch)
-		case s.favorites[ch.ID]:
+		case isFav:
 			favs = append(favs, ch)
 		case ch.IsIM:
 			dms = append(dms, ch)
@@ -311,11 +323,17 @@ func (s *ChannelsSidebar) rebuildRows() {
 		}
 	}
 
-	// Most recent activity surfaces first within each group; channels with no
-	// known LatestTS fall to the bottom in stable name order.
-	byLatest := func(group []slack.Channel) {
+	// Within each group, prioritize unread messages (for groups that aren't
+	// the "Unread" group itself), then sort by newest activity. Channels
+	// with no known LatestTS fall to the bottom in stable name order.
+	byActivity := func(group []slack.Channel) {
 		sort.SliceStable(group, func(i, j int) bool {
 			ci, cj := group[i], group[j]
+			// Prioritize unread count (relevant for Favorites and category groups)
+			if (ci.UnreadCount > 0) != (cj.UnreadCount > 0) {
+				return ci.UnreadCount > 0
+			}
+			// Then sort by latest timestamp
 			if ci.LatestTS != cj.LatestTS {
 				if ci.LatestTS == "" {
 					return false
@@ -328,24 +346,25 @@ func (s *ChannelsSidebar) rebuildRows() {
 			return ci.Name < cj.Name
 		})
 	}
-	byLatest(favs)
-	byLatest(unread)
-	byLatest(channels)
-	byLatest(externals)
-	byLatest(dms)
-	byLatest(mpdms)
+	byActivity(favs)
+	byActivity(unread)
+	byActivity(channels)
+	byActivity(externals)
+	byActivity(dms)
+	byActivity(mpdms)
 
 	groups := []struct {
 		header string
 		items  []slack.Channel
 		fav    bool
+		limit  bool
 	}{
-		{"Unread", unread, false},
-		{"Favorites", favs, true},
-		{"Channels", channels, false},
-		{"External", externals, false},
-		{"Direct messages", dms, false},
-		{"Group messages", mpdms, false},
+		{"Unread", unread, false, false},
+		{"Favorites", favs, true, false},
+		{"Channels", channels, false, true},
+		{"External", externals, false, true},
+		{"Direct messages", dms, false, true},
+		{"Group messages", mpdms, false, true},
 	}
 
 	rows := make([]*sidebarRow, 0, len(s.raw)+len(groups))
@@ -366,7 +385,13 @@ func (s *ChannelsSidebar) rebuildRows() {
 		if collapsed {
 			continue
 		}
-		for _, ch := range g.items {
+
+		items := g.items
+		if s.showOnlyRecent && g.limit && len(items) > 10 {
+			items = items[:10]
+		}
+
+		for _, ch := range items {
 			r, ok := old[ch.ID]
 			if !ok {
 				r = &sidebarRow{kind: rowChannel}
@@ -387,6 +412,20 @@ func headerKey(h string) string { return "__hdr:" + h }
 
 // Layout draws the sidebar.
 func (s *ChannelsSidebar) Layout(gtx layout.Context, th *Theme, fm *slack.Formatter) layout.Dimensions {
+	dirty := false
+	if s.showOnlyRecent != th.ShowOnlyRecentChannels {
+		s.showOnlyRecent = th.ShowOnlyRecentChannels
+		dirty = true
+	}
+	if s.hideEmpty != th.HideEmptyChannels {
+		s.hideEmpty = th.HideEmptyChannels
+		dirty = true
+	}
+
+	if dirty && s.raw != nil {
+		s.rebuildRows()
+	}
+
 	// Process row clicks.
 	var toggleHeader string
 	for _, r := range s.rows {
@@ -478,10 +517,12 @@ func (s *ChannelsSidebar) layoutRow(gtx layout.Context, th *Theme, fm *slack.For
 		textColor = th.SidebarPal.TextMuted
 	}
 
+	var presence string
 	prefix := channelPrefix(r.channel)
 	if r.channel.IsIM && fm != nil {
 		if u := fm.GetUser(r.channel.UserID); u != nil {
-			if u.Presence == "active" {
+			presence = u.Presence
+			if presence == "active" {
 				prefix = "● "
 			} else {
 				prefix = "○ "
@@ -498,10 +539,10 @@ func (s *ChannelsSidebar) layoutRow(gtx layout.Context, th *Theme, fm *slack.For
 		drawAccentStripe := func(gtx layout.Context) layout.Dimensions {
 			if leftBorder.Left {
 				return withBorder(gtx, th.SidebarPal.Accent, leftBorder, func(gtx layout.Context) layout.Dimensions {
-					return s.layoutRowInner(gtx, th, r, prefix, name, textColor, hasUnread, active, bg)
+					return s.layoutRowInner(gtx, th, r, prefix, name, presence, textColor, hasUnread, active, bg)
 				})
 			}
-			return s.layoutRowInner(gtx, th, r, prefix, name, textColor, hasUnread, active, bg)
+			return s.layoutRowInner(gtx, th, r, prefix, name, presence, textColor, hasUnread, active, bg)
 		}
 		return drawAccentStripe(gtx)
 	})
@@ -511,7 +552,7 @@ func (s *ChannelsSidebar) layoutRowInner(
 	gtx layout.Context,
 	th *Theme,
 	r *sidebarRow,
-	prefix, name string,
+	prefix, name, presence string,
 	textColor color.NRGBA,
 	hasUnread, active bool,
 	bg color.NRGBA,
@@ -527,7 +568,11 @@ func (s *ChannelsSidebar) layoutRowInner(
 				layout.Rigid(func(gtx layout.Context) layout.Dimensions {
 					lbl := material.Body1(th.Mat, prefix)
 					lbl.Color = th.SidebarPal.TextMuted
-					if active {
+					if presence == "active" {
+						lbl.Color = th.SidebarPal.PresenceActive
+					} else if presence == "away" {
+						lbl.Color = th.SidebarPal.PresenceAway
+					} else if active {
 						lbl.Color = th.SidebarPal.TextDim
 					}
 					th.applyFont(&lbl, th.Fonts.Channels)

@@ -7,6 +7,8 @@ import (
 	"strconv"
 	"strings"
 	"time"
+
+	"github.com/kyokomi/emoji/v2"
 )
 
 type Formatter struct {
@@ -21,6 +23,32 @@ func NewFormatter(cache *Cache, tsFormat string) *Formatter {
 		emojiMap: defaultEmojiMap(),
 		tsFormat: tsFormat,
 	}
+}
+
+func (f *Formatter) SetCustomEmojis(emojis map[string]string) {
+	for name, val := range emojis {
+		// handle aliases
+		for strings.HasPrefix(val, "alias:") {
+			alias := strings.TrimPrefix(val, "alias:")
+			if real, ok := emojis[alias]; ok {
+				val = real
+			} else if real, ok := f.emojiMap[alias]; ok {
+				val = real
+				break
+			} else {
+				break
+			}
+		}
+		f.emojiMap[name] = val
+	}
+}
+
+func (f *Formatter) IsCustomEmoji(name string) bool {
+	val, ok := f.emojiMap[name]
+	if !ok {
+		return false
+	}
+	return strings.HasPrefix(val, "http")
 }
 
 // StyleFlag is a UI-toolkit-agnostic bitmask describing how a text span should
@@ -85,23 +113,28 @@ func (f *Formatter) FormatSpans(text string) []Span {
 	return tokenize(text)
 }
 
-// FormatTimestamp converts a Slack timestamp to a human-readable time with age.
-func (f *Formatter) FormatTimestamp(ts string) string {
+func (f *Formatter) parseTimestamp(ts string) (time.Time, bool) {
 	parts := strings.SplitN(ts, ".", 2)
 	if len(parts) == 0 {
-		return ts
+		return time.Time{}, false
 	}
 	sec, err := strconv.ParseInt(parts[0], 10, 64)
 	if err != nil {
+		return time.Time{}, false
+	}
+	return time.Unix(sec, 0).Local(), true
+}
+
+// FormatTimestamp converts a Slack timestamp to a human-readable time with age.
+func (f *Formatter) FormatTimestamp(ts string) string {
+	t, ok := f.parseTimestamp(ts)
+	if !ok {
 		return ts
 	}
-	t := time.Unix(sec, 0).Local()
 
 	now := time.Now()
 	var formatted string
-	if t.Year() == now.Year() && t.YearDay() == now.YearDay() {
-		formatted = t.Format(f.tsFormat)
-	} else if t.Year() == now.Year() {
+	if t.Year() == now.Year() {
 		formatted = t.Format("Jan 2 " + f.tsFormat)
 	} else {
 		formatted = t.Format("Jan 2, 2006 " + f.tsFormat)
@@ -111,28 +144,19 @@ func (f *Formatter) FormatTimestamp(ts string) string {
 }
 
 func (f *Formatter) FormatTimestampAge(ts string) string {
-	parts := strings.SplitN(ts, ".", 2)
-	if len(parts) == 0 {
+	t, ok := f.parseTimestamp(ts)
+	if !ok {
 		return ts
 	}
-	sec, err := strconv.ParseInt(parts[0], 10, 64)
-	if err != nil {
-		return ts
-	}
-	return FormatAge(time.Since(time.Unix(sec, 0)))
+	return FormatAge(time.Since(t))
 }
 
 // FormatTimeOnly returns a formatted date/time string — used in message headers.
 func (f *Formatter) FormatTimeOnly(ts string) string {
-	parts := strings.SplitN(ts, ".", 2)
-	if len(parts) == 0 {
+	t, ok := f.parseTimestamp(ts)
+	if !ok {
 		return ts
 	}
-	sec, err := strconv.ParseInt(parts[0], 10, 64)
-	if err != nil {
-		return ts
-	}
-	t := time.Unix(sec, 0).Local()
 
 	now := time.Now()
 	var formatted string
@@ -504,282 +528,26 @@ func isAlphanumeric(b byte) bool {
 }
 
 func defaultEmojiMap() map[string]string {
-	return map[string]string{
+	m := map[string]string{
 		"thumbsup":              "\U0001F44D",
 		"+1":                    "\U0001F44D",
 		"thumbsdown":            "\U0001F44E",
 		"-1":                    "\U0001F44E",
-		"heart":                 "❤",
-		"smile":                 "\U0001F604",
-		"laughing":              "\U0001F606",
-		"grinning":              "\U0001F600",
-		"joy":                   "\U0001F602",
-		"rofl":                  "\U0001F923",
-		"wink":                  "\U0001F609",
-		"blush":                 "\U0001F60A",
-		"thinking_face":         "\U0001F914",
-		"eyes":                  "\U0001F440",
-		"fire":                  "\U0001F525",
-		"100":                   "\U0001F4AF",
+		"facepalm":              "\U0001F926",
+		"shrug":                 "\U0001F937",
 		"tada":                  "\U0001F389",
-		"rocket":                "\U0001F680",
-		"wave":                  "\U0001F44B",
-		"pray":                  "\U0001F64F",
-		"clap":                  "\U0001F44F",
-		"raised_hands":          "\U0001F64C",
-		"ok_hand":               "\U0001F44C",
-		"point_up":              "☝",
-		"point_down":            "\U0001F447",
-		"point_left":            "\U0001F448",
-		"point_right":           "\U0001F449",
-		"muscle":                "\U0001F4AA",
-		"white_check_mark":      "✅",
-		"heavy_check_mark":      "✔",
-		"x":                     "❌",
-		"warning":               "⚠",
-		"question":              "❓",
-		"exclamation":           "❗",
-		"bulb":                  "\U0001F4A1",
-		"memo":                  "\U0001F4DD",
-		"wrench":                "\U0001F527",
-		"gear":                  "⚙",
-		"bug":                   "\U0001F41B",
-		"star":                  "⭐",
-		"sparkles":              "✨",
-		"zap":                   "⚡",
-		"sunny":                 "☀",
-		"cloud":                 "☁",
-		"umbrella":              "☂",
-		"coffee":                "☕",
-		"beer":                  "\U0001F37A",
-		"pizza":                 "\U0001F355",
-		"taco":                  "\U0001F32E",
-		"green_heart":           "\U0001F49A",
-		"blue_heart":            "\U0001F499",
-		"purple_heart":          "\U0001F49C",
-		"broken_heart":          "\U0001F494",
-		"skull":                 "\U0001F480",
-		"ghost":                 "\U0001F47B",
-		"robot_face":            "\U0001F916",
-		"see_no_evil":           "\U0001F648",
-		"hear_no_evil":          "\U0001F649",
-		"speak_no_evil":         "\U0001F64A",
-		"sob":                   "\U0001F62D",
-		"cry":                   "\U0001F622",
-		"angry":                 "\U0001F620",
-		"rage":                  "\U0001F621",
-		"sweat_smile":           "\U0001F605",
-		"sweat":                 "\U0001F613",
-		"grimacing":             "\U0001F62C",
-		"relieved":              "\U0001F60C",
-		"unamused":              "\U0001F612",
-		"disappointed":          "\U0001F61E",
-		"confused":              "\U0001F615",
-		"sleeping":              "\U0001F634",
-		"sunglasses":            "\U0001F60E",
-		"nerd_face":             "\U0001F913",
-		"party_popper":          "\U0001F389",
-		"confetti_ball":         "\U0001F38A",
-		"balloon":               "\U0001F388",
-		"gift":                  "\U0001F381",
-		"trophy":                "\U0001F3C6",
-		"medal":                 "\U0001F3C5",
-		"crown":                 "\U0001F451",
-		"gem":                   "\U0001F48E",
-		"lock":                  "\U0001F512",
-		"key":                   "\U0001F511",
-		"link":                  "\U0001F517",
-		"paperclip":             "\U0001F4CE",
-		"scissors":              "✂",
-		"hammer":                "\U0001F528",
-		"hammer_and_wrench":     "\U0001F6E0",
-		"hourglass":             "⌛",
-		"stopwatch":             "⏱",
-		"alarm_clock":           "⏰",
-		"calendar":              "\U0001F4C5",
-		"pushpin":               "\U0001F4CC",
-		"round_pushpin":         "\U0001F4CD",
-		"mag":                   "\U0001F50D",
-		"bell":                  "\U0001F514",
-		"no_bell":               "\U0001F515",
-		"speech_balloon":        "\U0001F4AC",
-		"thought_balloon":       "\U0001F4AD",
-		"arrow_up":              "⬆",
-		"arrow_down":            "⬇",
-		"arrow_left":            "⬅",
-		"arrow_right":           "➡",
-		"heavy_plus_sign":       "➕",
-		"heavy_minus_sign":      "➖",
-		"wavy_dash":             "〰",
+		"100":                   "\U0001F4AF",
+		"100pct":                "\U0001F4AF",
 		"slightly_smiling_face": "\U0001F642",
 		"upside_down_face":      "\U0001F643",
-		"stuck_out_tongue":      "\U0001F61B",
-		"octagonal_sign":        "\U0001F6D1",
-		"no_entry":              "⛔",
-		"no_entry_sign":         "\U0001F6AB",
-		"red_circle":            "\U0001F534",
-		"large_blue_circle":     "\U0001F535",
-		"green_circle":          "\U0001F7E2",
-		"yellow_circle":         "\U0001F7E1",
-		"orange_circle":         "\U0001F7E0",
-		"black_circle":          "⚫",
-		"white_circle":          "⚪",
-		"large_green_square":    "\U0001F7E9",
-		"large_yellow_square":   "\U0001F7E8",
-		"large_red_square":      "\U0001F7E5",
-		"large_blue_square":     "\U0001F7E6",
-		"shrug":                 "\U0001F937",
-		"face_palm":             "\U0001F926",
-		"facepalm":              "\U0001F926",
-		"thinking":              "\U0001F914",
-		"woman-shrugging":       "\U0001F937‍♀️",
-		"man-shrugging":         "\U0001F937‍♂️",
-		"smiley":                "\U0001F603",
-		"neutral_face":          "\U0001F610",
-		"expressionless":        "\U0001F611",
-		"flushed":               "\U0001F633",
-		"open_mouth":            "\U0001F62E",
-		"hushed":                "\U0001F62F",
-		"astonished":            "\U0001F632",
-		"scream":                "\U0001F631",
-		"persevere":             "\U0001F623",
-		"pleading_face":         "\U0001F97A",
-		"smiling_face_with_tear": "\U0001F972",
-		"partying_face":         "\U0001F973",
-		"smiling_imp":           "\U0001F608",
-		"imp":                   "\U0001F47F",
-		"alien":                 "\U0001F47D",
-		"poop":                  "\U0001F4A9",
-		"hankey":                "\U0001F4A9",
-		"hand":                  "✋",
-		"raised_hand":           "✋",
-		"raised_back_of_hand":   "\U0001F91A",
-		"vulcan_salute":         "\U0001F596",
-		"crossed_fingers":       "\U0001F91E",
-		"v":                     "✌",
-		"metal":                 "\U0001F918",
-		"call_me_hand":          "\U0001F919",
-		"writing_hand":          "✍",
-		"selfie":                "\U0001F933",
-		"open_hands":            "\U0001F450",
-		"handshake":             "\U0001F91D",
-		"folded_hands":          "\U0001F64F",
-		"dancer":                "\U0001F483",
-		"man_dancing":           "\U0001F57A",
-		"running":               "\U0001F3C3",
-		"walking":               "\U0001F6B6",
-		"bow":                   "\U0001F647",
-		"information_source":    "ℹ",
-		"recycle":               "♻",
-		"radioactive_sign":      "☢",
-		"biohazard":             "☣",
-		"trident":               "\U0001F531",
-		"name_badge":            "\U0001F4DB",
-		"beginner":              "\U0001F530",
-		"o":                     "⭕",
-		"o2":                    "\U0001F17E️",
-		"sos":                   "\U0001F198",
-		"checkered_flag":        "\U0001F3C1",
-		"triangular_flag_on_post": "\U0001F6A9",
-		"crossed_flags":         "\U0001F38C",
-		"black_flag":            "\U0001F3F4",
-		"white_flag":            "\U0001F3F3",
-		"siren":                 "\U0001F6A8",
-		"rotating_light":        "\U0001F6A8",
-		"police_car":            "\U0001F693",
-		"ambulance":             "\U0001F691",
-		"fire_engine":           "\U0001F692",
-		"construction":          "\U0001F6A7",
-		"no_good":               "\U0001F645",
-		"ok_woman":              "\U0001F646",
-		"raising_hand":          "\U0001F64B",
-		"bow_and_arrow":         "\U0001F3F9",
-		"shield":                "\U0001F6E1",
-		"chart_with_upwards_trend": "\U0001F4C8",
-		"chart_with_downwards_trend": "\U0001F4C9",
-		"bar_chart":             "\U0001F4CA",
-		"clipboard":             "\U0001F4CB",
-		"date":                  "\U0001F4C5",
-		"chart":                 "\U0001F4B9",
-		"book":                  "\U0001F4D6",
-		"books":                 "\U0001F4DA",
-		"computer":              "\U0001F4BB",
-		"desktop_computer":      "\U0001F5A5",
-		"keyboard":              "⌨",
-		"mouse":                 "\U0001F5B1",
-		"floppy_disk":           "\U0001F4BE",
-		"cd":                    "\U0001F4BF",
-		"dvd":                   "\U0001F4C0",
-		"package":               "\U0001F4E6",
-		"mailbox":               "\U0001F4EB",
-		"email":                 "\U0001F4E7",
-		"envelope":              "✉",
-		"phone":                 "\U0001F4DE",
-		"iphone":                "\U0001F4F1",
-		"telephone_receiver":    "\U0001F4DE",
-		"speaker":               "\U0001F50A",
-		"loudspeaker":           "\U0001F4E2",
-		"mega":                  "\U0001F4E3",
-		"mute":                  "\U0001F507",
-		"sound":                 "\U0001F509",
-		"loud_sound":            "\U0001F50A",
-		"musical_note":          "\U0001F3B5",
-		"notes":                 "\U0001F3B6",
-		"saxophone":             "\U0001F3B7",
-		"guitar":                "\U0001F3B8",
-		"trumpet":               "\U0001F3BA",
-		"violin":                "\U0001F3BB",
-		"drum_with_drumsticks":  "\U0001F941",
-		"microphone":            "\U0001F3A4",
-		"headphones":            "\U0001F3A7",
-		"radio":                 "\U0001F4FB",
-		"tv":                    "\U0001F4FA",
-		"camera":                "\U0001F4F7",
-		"video_camera":          "\U0001F4F9",
-		"clipboard2":            "\U0001F4CB",
-		"hammer_and_pick":       "⚒",
-		"crossed_swords":        "⚔",
-		"gun":                   "\U0001F52B",
-		"bomb":                  "\U0001F4A3",
-		"smoking":               "\U0001F6AC",
-		"coffin":                "⚰",
-		"funeral_urn":           "⚱",
-		"amphora":               "\U0001F3FA",
-		"crystal_ball":          "\U0001F52E",
-		"prayer_beads":          "\U0001F4FF",
-		"barber":                "\U0001F488",
-		"alembic":               "⚗",
-		"telescope":             "\U0001F52D",
-		"microscope":            "\U0001F52C",
-		"hole":                  "\U0001F573",
-		"pill":                  "\U0001F48A",
-		"syringe":               "\U0001F489",
-		"thermometer":           "\U0001F321",
-		"label":                 "\U0001F3F7",
-		"newspaper":             "\U0001F4F0",
-		"page_facing_up":        "\U0001F4C4",
-		"page_with_curl":        "\U0001F4C3",
-		"bookmark":              "\U0001F516",
-		"bookmark_tabs":         "\U0001F4D1",
-		"ledger":                "\U0001F4D2",
-		"notebook":              "\U0001F4D3",
-		"notebook_with_decorative_cover": "\U0001F4D4",
-		"closed_book":           "\U0001F4D5",
-		"green_book":            "\U0001F4D7",
-		"blue_book":             "\U0001F4D8",
-		"orange_book":           "\U0001F4D9",
-		"open_book":             "\U0001F4D6",
-		"file_folder":           "\U0001F4C1",
-		"open_file_folder":      "\U0001F4C2",
-		"card_index_dividers":   "\U0001F5C2",
-		"card_index":            "\U0001F4C7",
-		"card_file_box":         "\U0001F5C3",
-		"file_cabinet":          "\U0001F5C4",
-		"wastebasket":           "\U0001F5D1",
-		"spiral_notepad":        "\U0001F5D2",
-		"spiral_calendar":       "\U0001F5D3",
-		"chart_with_upwards_trend2": "\U0001F4C8",
-		"sleeping_accommodation": "\U0001F6CC",
-		"100pct":                "\U0001F4AF",
 	}
+
+	for k, v := range emoji.CodeMap() {
+		name := strings.Trim(k, ":")
+		if _, ok := m[name]; !ok {
+			m[name] = v
+		}
+	}
+
+	return m
 }

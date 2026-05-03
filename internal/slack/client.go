@@ -8,6 +8,7 @@ import (
 	"sort"
 	"strings"
 	"sync"
+	"time"
 
 	slackapi "github.com/slack-go/slack"
 )
@@ -61,6 +62,10 @@ var slackErrors = map[string]string{
 	"already_reacted":                     "You already reacted with this emoji",
 	"no_reaction":                         "You haven't reacted with this emoji",
 	"too_many_reactions":                  "Too many reactions on this message",
+}
+
+func (c *Client) GetEmoji() (map[string]string, error) {
+	return c.api.GetEmoji()
 }
 
 func (c *Client) MergeMessages(a, b []Message) []Message {
@@ -254,8 +259,20 @@ func (c *Client) GetChannels(types []string, priorityIDs []string) ([]Channel, e
 					cc.Name = ch.User
 				}
 			}
+
+			// Pre-populate from cache so we have data for hideEmpty even if enrichment is skipped.
+			if cached := c.cache.GetChannel(ch.ID); cached != nil {
+				cc.UnreadCount = cached.UnreadCount
+				cc.LatestTS = cached.LatestTS
+				cc.LastReadTS = cached.LastReadTS
+				if cc.LatestTS != "" {
+					cc.LatestTSVerified = true
+				}
+			}
+
 			if ch.Latest != nil {
 				cc.LatestTS = ch.Latest.Timestamp
+				cc.LatestTSVerified = true
 			}
 			allChannels = append(allChannels, cc)
 		}
@@ -361,7 +378,7 @@ func (c *Client) enrichWithUnreadCounts(channels []Channel, priorityIDs []string
 
 	for i := range channels {
 		isPriority := priorityMap[channels[i].ID] || channels[i].UnreadCount > 0
-		if len(channels) > 50 && !isPriority {
+		if len(channels) > 200 && !isPriority {
 			continue
 		}
 
@@ -369,7 +386,11 @@ func (c *Client) enrichWithUnreadCounts(channels []Channel, priorityIDs []string
 		go func(idx int) {
 			defer wg.Done()
 			sem <- struct{}{}
-			defer func() { <-sem }()
+			defer func() {
+				// stagger slightly to avoid hitting Tier 3 burst limits
+				time.Sleep(100 * time.Millisecond)
+				<-sem
+			}()
 
 			info, err := c.api.GetConversationInfo(&slackapi.GetConversationInfoInput{
 				ChannelID: channels[idx].ID,
@@ -383,6 +404,25 @@ func (c *Client) enrichWithUnreadCounts(channels []Channel, priorityIDs []string
 			if info.Latest != nil {
 				channels[idx].LatestTS = info.Latest.Timestamp
 			}
+
+			// If LatestTS is still empty after info check, do a surgical history probe
+			// to be absolutely sure it's empty before we let the UI hide it.
+			if channels[idx].LatestTS == "" {
+				h, err := c.api.GetConversationHistory(&slackapi.GetConversationHistoryParameters{
+					ChannelID: channels[idx].ID,
+					Limit:     1,
+				})
+				if err == nil && len(h.Messages) > 0 {
+					channels[idx].LatestTS = h.Messages[0].Timestamp
+					slog.Debug("sidebar: verified non-empty via history", "id", channels[idx].ID, "name", channels[idx].Name, "ts", channels[idx].LatestTS)
+				} else if err == nil {
+					slog.Debug("sidebar: verified TRULY empty via history", "id", channels[idx].ID, "name", channels[idx].Name)
+				} else {
+					slog.Debug("sidebar: history probe failed", "id", channels[idx].ID, "error", err)
+				}
+			}
+
+			channels[idx].LatestTSVerified = true
 		}(i)
 	}
 	wg.Wait()
@@ -545,7 +585,17 @@ func (c *Client) Search(query string) ([]SearchResult, error) {
 	return results, nil
 }
 
+const (
+	SlackbotID = "USLACKBOT"
+)
+
 func (c *Client) ResolveUser(userID string) (*User, error) {
+	if userID == "" {
+		return nil, errors.New("empty user ID")
+	}
+	if strings.HasPrefix(userID, "B") {
+		return c.ResolveBot(userID)
+	}
 	if user := c.cache.GetUser(userID); user != nil {
 		return user, nil
 	}
@@ -566,7 +616,7 @@ func (c *Client) ResolveUser(userID string) (*User, error) {
 		Name:        info.Name,
 		RealName:    info.RealName,
 		DisplayName: info.Profile.DisplayName,
-		IsBot:       info.IsBot,
+		IsBot:       info.IsBot || info.ID == SlackbotID,
 		Presence:    presence,
 		StatusEmoji: info.Profile.StatusEmoji,
 		StatusText:  info.Profile.StatusText,
@@ -583,6 +633,15 @@ func (c *Client) ResolveUser(userID string) (*User, error) {
 		user.RealName = user.DisplayName
 	}
 
+	if info.ID == SlackbotID && user.ImageURL == "" {
+		// Slackbot's profile often has a dedicated image if not in Image192
+		if info.Profile.Image72 != "" {
+			user.ImageURL = info.Profile.Image72
+		} else if info.Profile.Image48 != "" {
+			user.ImageURL = info.Profile.Image48
+		}
+	}
+
 	if profile, err := c.api.GetUserProfile(&slackapi.GetUserProfileParameters{
 		UserID: userID,
 	}); err == nil {
@@ -592,6 +651,35 @@ func (c *Client) ResolveUser(userID string) (*User, error) {
 		if profile.Phone != "" {
 			user.Phone = profile.Phone
 		}
+	}
+
+	c.cache.SetUser(user)
+	return user, nil
+}
+
+func (c *Client) ResolveBot(botID string) (*User, error) {
+	if user := c.cache.GetUser(botID); user != nil {
+		return user, nil
+	}
+
+	bot, err := c.api.GetBotInfo(slackapi.GetBotInfoParameters{Bot: botID})
+	if err != nil {
+		return nil, fmt.Errorf("get bot: %w", err)
+	}
+
+	user := &User{
+		ID:          bot.ID,
+		Name:        bot.Name,
+		DisplayName: bot.Name,
+		RealName:    bot.Name,
+		IsBot:       true,
+		ImageURL:    bot.Icons.Image72,
+	}
+	if user.ImageURL == "" {
+		user.ImageURL = bot.Icons.Image48
+	}
+	if user.ImageURL == "" {
+		user.ImageURL = bot.Icons.Image36
 	}
 
 	c.cache.SetUser(user)
@@ -618,14 +706,49 @@ func (c *Client) GetUserGroups() ([]UserGroup, error) {
 
 func (c *Client) convertMessage(msg slackapi.Message) Message {
 	username := msg.Username
+	userID := msg.User
+
+	if msg.BotProfile != nil {
+		if username == "" {
+			username = msg.BotProfile.Name
+		}
+		if userID == "" {
+			userID = msg.BotProfile.ID
+		}
+		if c.cache.GetUser(userID) == nil {
+			c.cache.SetUser(&User{
+				ID:          userID,
+				Name:        msg.BotProfile.Name,
+				DisplayName: msg.BotProfile.Name,
+				RealName:    msg.BotProfile.Name,
+				IsBot:       true,
+				ImageURL:    msg.BotProfile.Icons.Image72,
+			})
+		}
+	}
+
 	if username == "" {
-		if user, err := c.ResolveUser(msg.User); err == nil {
-			username = user.DisplayName
-			if username == "" {
-				username = user.Name
+		if userID != "" {
+			if user, err := c.ResolveUser(userID); err == nil {
+				username = user.DisplayName
+				if username == "" {
+					username = user.Name
+				}
 			}
-		} else {
-			username = msg.User
+		} else if msg.BotID != "" {
+			if bot, err := c.ResolveBot(msg.BotID); err == nil {
+				username = bot.DisplayName
+				userID = bot.ID
+			}
+		}
+	}
+
+	if username == "" {
+		if userID != "" {
+			username = userID
+		} else if msg.BotID != "" {
+			username = msg.BotID
+			userID = msg.BotID
 		}
 	}
 
@@ -744,7 +867,7 @@ func (c *Client) convertMessage(msg slackapi.Message) Message {
 
 	return Message{
 		Timestamp:   msg.Timestamp,
-		UserID:      msg.User,
+		UserID:      userID,
 		Username:    username,
 		Text:        text,
 		ThreadTS:    msg.ThreadTimestamp,
@@ -754,7 +877,7 @@ func (c *Client) convertMessage(msg slackapi.Message) Message {
 		EditedTS:    editedTS,
 		EditHistory: nil,
 		Files:       files,
-		IsBot:       msg.BotID != "",
+		IsBot:       msg.BotID != "" || msg.BotProfile != nil,
 	}
 }
 

@@ -5,8 +5,10 @@ import (
 	"image"
 	"image/color"
 
+	"gioui.org/f32"
 	"gioui.org/font"
 	"gioui.org/layout"
+	"gioui.org/op"
 	"gioui.org/op/paint"
 	"gioui.org/text"
 	"gioui.org/unit"
@@ -424,19 +426,22 @@ func moveSelection(selected *int, rows []*messageRow, list *widget.List, delta i
 	if pos.Count <= 0 {
 		pos.First = idx
 		pos.Offset = 0
-	} else if idx < pos.First {
+	} else if idx <= pos.First {
 		pos.First = idx
 		pos.Offset = 0
-	} else if idx >= pos.First+pos.Count {
-		pos.First = idx - pos.Count + 1
+	} else if idx >= pos.First+pos.Count-1 {
+		pos.First = idx - pos.Count + 2
 		if pos.First < 0 {
 			pos.First = 0
 		}
+		if pos.First > idx {
+			pos.First = idx
+		}
 		pos.Offset = 0
 	}
-	// Stop pinning to bottom once the user steers manually; ScrollToEnd
-	// would otherwise yank us back to the latest message every frame.
-	list.ScrollToEnd = false
+	// Pin to bottom if we've selected the very last message and there are
+	// actually more items than we can see.
+	list.ScrollToEnd = (pos.Count < len(rows)) && idx == len(rows)-1
 	return true
 }
 
@@ -738,22 +743,39 @@ func (m *MessagesView) layoutRow(gtx layout.Context, th *Theme, fmt *slack.Forma
 								if name == "" {
 									name = r.msg.UserID
 								}
+								var presence string
 								if u := fmt.GetUser(r.msg.UserID); u != nil {
-									if u.Presence == "active" {
-										name = "● " + name
-									} else {
-										name = "○ " + name
-									}
+									presence = u.Presence
 								}
-								lbl := material.Body1(th.Mat, name)
-								lbl.Font.Weight = font.SemiBold
-								lbl.Color = th.Pal.TextStrong
-								th.applyFont(&lbl, th.Fonts.Messages)
-								return lbl.Layout(gtx)
+
+								return layout.Flex{Alignment: layout.Middle}.Layout(gtx,
+									layout.Rigid(func(gtx layout.Context) layout.Dimensions {
+										if presence == "" {
+											return layout.Dimensions{}
+										}
+										dot := "○ "
+										col := th.Pal.PresenceAway
+										if presence == "active" {
+											dot = "● "
+											col = th.Pal.PresenceActive
+										}
+										lbl := material.Body1(th.Mat, dot)
+										lbl.Color = col
+										th.applyFont(&lbl, th.Fonts.Messages)
+										return lbl.Layout(gtx)
+									}),
+									layout.Rigid(func(gtx layout.Context) layout.Dimensions {
+										lbl := material.Body1(th.Mat, name)
+										lbl.Font.Weight = font.SemiBold
+										lbl.Color = th.Pal.TextStrong
+										th.applyFont(&lbl, th.Fonts.Messages)
+										return lbl.Layout(gtx)
+									}),
+								)
 							}),
 							layout.Rigid(layout.Spacer{Width: unit.Dp(8)}.Layout),
 							layout.Rigid(func(gtx layout.Context) layout.Dimensions {
-								lbl := material.Caption(th.Mat, fmt.FormatTimeOnly(r.msg.Timestamp))
+								lbl := material.Caption(th.Mat, fmt.FormatTimestamp(r.msg.Timestamp))
 								lbl.Color = th.Pal.TextMuted
 								th.applyFont(&lbl, th.Fonts.Messages)
 								return lbl.Layout(gtx)
@@ -946,10 +968,11 @@ func (m *MessagesView) layoutThreadBadge(gtx layout.Context, th *Theme, count in
 	if count == 1 {
 		noun = "reply"
 	}
-	return layout.Inset{Top: unit.Dp(2)}.Layout(gtx, func(gtx layout.Context) layout.Dimensions {
-		lbl := material.Caption(th.Mat, fmt.Sprintf("💬 %d %s", count, noun))
-		lbl.Color = th.Pal.Link
-		lbl.Font.Weight = font.Medium
+	return layout.Inset{Top: unit.Dp(4)}.Layout(gtx, func(gtx layout.Context) layout.Dimensions {
+		lbl := material.Body2(th.Mat, fmt.Sprintf("💬 %d %s", count, noun))
+		lbl.Color = th.Pal.Accent
+		lbl.Font.Weight = font.Bold
+		th.applyFont(&lbl, th.Fonts.Threads)
 		return lbl.Layout(gtx)
 	})
 }
@@ -985,6 +1008,28 @@ func (m *MessagesView) layoutReactionChip(gtx layout.Context, th *Theme, fm *sla
 		}.Layout(gtx, func(gtx layout.Context) layout.Dimensions {
 			return layout.Flex{Alignment: layout.Middle}.Layout(gtx,
 				layout.Rigid(func(gtx layout.Context) layout.Dimensions {
+					if fm.IsCustomEmoji(r.Name) {
+						url := fm.FormatEmoji(r.Name)
+						imgOp, ok, done := m.images.GetOp(url)
+						if !done {
+							// Loading
+							gtx.Constraints.Min = image.Point{X: gtx.Dp(18), Y: gtx.Dp(18)}
+							return layout.Dimensions{Size: gtx.Constraints.Min}
+						}
+						if ok {
+							target := gtx.Dp(18)
+							size := imgOp.Size()
+							scale := float32(target) / float32(max(size.X, size.Y))
+							dx := (float32(target) - float32(size.X)*scale) / 2
+							dy := (float32(target) - float32(size.Y)*scale) / 2
+
+							stack := op.Affine(f32.Affine2D{}.Scale(f32.Pt(0, 0), f32.Pt(scale, scale)).Offset(f32.Pt(dx/scale, dy/scale))).Push(gtx.Ops)
+							imgOp.Add(gtx.Ops)
+							paint.PaintOp{}.Add(gtx.Ops)
+							stack.Pop()
+							return layout.Dimensions{Size: image.Point{X: target, Y: target}}
+						}
+					}
 					emoji := material.Body2(th.Mat, fm.FormatEmoji(r.Name))
 					emoji.Color = textColor
 					return emoji.Layout(gtx)

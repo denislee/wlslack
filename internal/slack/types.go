@@ -13,6 +13,7 @@ type Channel struct {
 	UnreadCount int
 	LastReadTS  string
 	LatestTS    string
+	LatestTSVerified bool
 }
 
 type Message struct {

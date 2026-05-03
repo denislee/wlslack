@@ -113,6 +113,8 @@ func Run(client *slack.Client, cfg *config.Config) error {
 	state := config.LoadUIState()
 	a.th.ApplyFontPrefs(prefsFromState(state.Fonts))
 	a.th.ApplyThemePrefs(state.ThemeSidebar, state.ThemeMain)
+	a.th.ShowOnlyRecentChannels = state.ShowOnlyRecentChannels
+	a.th.HideEmptyChannels = state.HideEmptyChannels
 	a.channels.SetFavorites(state.Favorites, a.onFavoritesChanged)
 	a.channels.SetCollapsedGroups(state.CollapsedGroups, a.onCollapsedGroupsChanged)
 	a.messages = newMessagesView(images)
@@ -120,14 +122,29 @@ func Run(client *slack.Client, cfg *config.Config) error {
 	a.switcher = newQuickSwitcher(a.onSwitcherSelect)
 	a.linkPicker = newLinkPicker(a.onLinkPickerSelect)
 	a.imageViewer = newImageViewer(images)
-	a.reactionPicker = newReactionPicker(a.onReactionPickerSelect)
+	a.reactionPicker = newReactionPicker(images, a.onReactionPickerSelect)
 	a.reactionPicker.SetEmojis(a.fmt.EmojiCatalog())
 	a.settings = newSettingsScreen(a.th, a.onFontsChanged, a.closeSettings)
 
 	go a.pollChannels()
 	go a.pollActiveChannel()
+	go a.pollEmojis()
 
 	return a.loop()
+}
+
+func (a *App) pollEmojis() {
+	emojis, err := a.client.GetEmoji()
+	if err != nil {
+		slog.Error("GetEmoji failed", "error", err)
+		return
+	}
+	a.fmt.SetCustomEmojis(emojis)
+	a.w.Invalidate()
+	// Update reaction picker with new emojis
+	a.mu.Lock()
+	a.reactionPicker.SetEmojis(a.fmt.EmojiCatalog())
+	a.mu.Unlock()
 }
 
 func (a *App) loop() error {
@@ -487,6 +504,23 @@ func (a *App) handleKeys(gtx layout.Context) {
 						Data: io.NopCloser(strings.NewReader(v)),
 					})
 				}
+			} else if a.focusPane == paneMessages {
+				msg, _, ok := a.messages.SelectedMessage()
+				if ok {
+					text := a.fmt.Format(msg.Text)
+					for _, f := range msg.Files {
+						if text != "" {
+							text += "\n"
+						}
+						text += f.PreferredImageURL()
+					}
+					if text != "" {
+						gtx.Execute(clipboard.WriteCmd{
+							Type: "application/text",
+							Data: io.NopCloser(strings.NewReader(text)),
+						})
+					}
+				}
 			}
 		case kev.Name == "R":
 			// Shift differentiates the two reaction shortcuts: capital R
@@ -593,16 +627,9 @@ func (a *App) openReactionPicker() {
 		return
 	}
 
-	var existing []string
-	for _, r := range msg.Reactions {
-		if r.Name != "" {
-			existing = append(existing, r.Name)
-		}
-	}
-
 	a.reactionTargetCh = chID
 	a.reactionTargetTS = ts
-	a.reactionPicker.Reset(existing)
+	a.reactionPicker.Reset(msg.Reactions, a.fmt)
 	a.reactionPickerOpen = true
 	a.pendFocusReactionPicker = true
 	a.w.Invalidate()
@@ -633,7 +660,8 @@ func (a *App) onReactionPickerSelect(name string) {
 
 // echoReactions adds the current user's reaction to every emoji already on
 // the highlighted message, skipping the ones the user has already reacted
-// to. Triggered by capital R.
+// to. Triggered by capital R. If the user has already reacted with every
+// emoji present on the message, it instead removes all their reactions.
 func (a *App) echoReactions() {
 	msg, ts, ok := a.messages.SelectedMessage()
 	if !ok {
@@ -643,20 +671,38 @@ func (a *App) echoReactions() {
 	if chID == "" {
 		return
 	}
-	names := make([]string, 0, len(msg.Reactions))
+
+	allHaveMe := len(msg.Reactions) > 0
+	toAdd := make([]string, 0, len(msg.Reactions))
+	toRemove := make([]string, 0, len(msg.Reactions))
+
 	for _, r := range msg.Reactions {
-		if r.HasMe || r.Name == "" {
+		if r.Name == "" {
 			continue
 		}
-		names = append(names, r.Name)
+		if r.HasMe {
+			toRemove = append(toRemove, r.Name)
+		} else {
+			allHaveMe = false
+			toAdd = append(toAdd, r.Name)
+		}
 	}
-	if len(names) == 0 {
-		return
-	}
+
 	go func() {
-		for _, name := range names {
-			if err := a.client.AddReaction(chID, ts, name); err != nil {
-				slog.Error("AddReaction failed", "channel", chID, "ts", ts, "emoji", name, "error", err)
+		if allHaveMe {
+			for _, name := range toRemove {
+				if err := a.client.RemoveReaction(chID, ts, name); err != nil {
+					slog.Error("RemoveReaction failed", "channel", chID, "ts", ts, "emoji", name, "error", err)
+				}
+			}
+		} else {
+			if len(toAdd) == 0 {
+				return
+			}
+			for _, name := range toAdd {
+				if err := a.client.AddReaction(chID, ts, name); err != nil {
+					slog.Error("AddReaction failed", "channel", chID, "ts", ts, "emoji", name, "error", err)
+				}
 			}
 		}
 		a.refreshAfterReaction(chID, ts)
@@ -734,6 +780,8 @@ func (a *App) onFontsChanged() {
 	state.Fonts = stateFromTheme(a.th)
 	state.ThemeSidebar = a.th.ThemeSidebar
 	state.ThemeMain = a.th.ThemeMain
+	state.ShowOnlyRecentChannels = a.th.ShowOnlyRecentChannels
+	state.HideEmptyChannels = a.th.HideEmptyChannels
 	config.SaveUIState(state)
 	a.w.Invalidate()
 }
@@ -746,6 +794,7 @@ func prefsFromState(p config.FontPrefs) sectionPrefs {
 		Channels: conv(p.Channels),
 		Header:   conv(p.Header),
 		Messages: conv(p.Messages),
+		Threads:  conv(p.Threads),
 		Composer: conv(p.Composer),
 		Code:     conv(p.Code),
 		Search:   conv(p.Search),
@@ -759,6 +808,7 @@ func stateFromTheme(th *Theme) config.FontPrefs {
 		Channels: conv(th.Fonts.Channels),
 		Header:   conv(th.Fonts.Header),
 		Messages: conv(th.Fonts.Messages),
+		Threads:  conv(th.Fonts.Threads),
 		Composer: conv(th.Fonts.Composer),
 		Code:     conv(th.Fonts.Code),
 		Search:   conv(th.Fonts.Search),

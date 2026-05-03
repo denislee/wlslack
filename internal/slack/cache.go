@@ -4,6 +4,7 @@ import (
 	"log/slog"
 	"os"
 	"path/filepath"
+	"sort"
 	"sync"
 	"time"
 )
@@ -216,6 +217,18 @@ func (c *Cache) GetAllChannels() []Channel {
 	for _, ch := range c.channels {
 		channels = append(channels, *ch)
 	}
+	sort.SliceStable(channels, func(i, j int) bool {
+		if channels[i].LatestTS != channels[j].LatestTS {
+			if channels[i].LatestTS == "" {
+				return false
+			}
+			if channels[j].LatestTS == "" {
+				return true
+			}
+			return channels[i].LatestTS > channels[j].LatestTS
+		}
+		return channels[i].Name < channels[j].Name
+	})
 	return channels
 }
 

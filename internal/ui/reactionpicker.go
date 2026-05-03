@@ -1,11 +1,15 @@
 package ui
 
 import (
+	"image"
 	"strings"
 	"unicode/utf8"
 
+	"gioui.org/f32"
 	"gioui.org/font"
 	"gioui.org/layout"
+	"gioui.org/op"
+	"gioui.org/op/paint"
 	"gioui.org/unit"
 	"gioui.org/widget"
 	"gioui.org/widget/material"
@@ -17,23 +21,26 @@ import (
 // message. The user types to filter the emoji catalog and Enter applies the
 // highlighted emoji as a reaction.
 type ReactionPicker struct {
-	editor    widget.Editor
-	list      widget.List
-	all       []slack.EmojiEntry
-	existing  []string
-	rows      []*reactionRow
-	selected  int
-	lastQuery string
-	onSelect  func(name string)
+	editor     widget.Editor
+	list       widget.List
+	all        []slack.EmojiEntry
+	existing   []string
+	reactorMap map[string]string
+	rows       []*reactionRow
+	selected   int
+	lastQuery  string
+	onSelect   func(name string)
+	images     *slack.ImageLoader
 }
 
 type reactionRow struct {
-	click widget.Clickable
-	entry slack.EmojiEntry
+	click    widget.Clickable
+	entry    slack.EmojiEntry
+	reactors string
 }
 
-func newReactionPicker(onSelect func(string)) *ReactionPicker {
-	rp := &ReactionPicker{onSelect: onSelect}
+func newReactionPicker(images *slack.ImageLoader, onSelect func(string)) *ReactionPicker {
+	rp := &ReactionPicker{images: images, onSelect: onSelect}
 	rp.editor.SingleLine = true
 	rp.list.Axis = layout.Vertical
 	return rp
@@ -46,11 +53,30 @@ func (r *ReactionPicker) SetEmojis(entries []slack.EmojiEntry) {
 }
 
 // Reset clears the query and selection. Call when the picker opens.
-func (r *ReactionPicker) Reset(existing []string) {
+func (r *ReactionPicker) Reset(detailed []slack.Reaction, fm *slack.Formatter) {
 	r.editor.SetText("")
 	r.lastQuery = ""
 	r.selected = 0
-	r.existing = existing
+	r.existing = nil
+	r.reactorMap = make(map[string]string)
+	for _, dr := range detailed {
+		r.existing = append(r.existing, dr.Name)
+		reactors := make([]string, 0, len(dr.Users))
+		for _, uID := range dr.Users {
+			name := uID
+			if u := fm.GetUser(uID); u != nil {
+				name = u.Name
+				if u.DisplayName != "" {
+					name = u.DisplayName
+				}
+			}
+			reactors = append(reactors, name)
+		}
+		if len(reactors) > 0 {
+			r.reactorMap[dr.Name] = strings.Join(reactors, ", ")
+		}
+	}
+
 	r.list.Position.First = 0
 	r.list.Position.Offset = 0
 	r.refilter()
@@ -129,7 +155,7 @@ func (r *ReactionPicker) refilter() {
 	for _, e := range r.all {
 		if existingMap[e.Name] {
 			if query == "" || strings.Contains(e.Name, query) {
-				out = append(out, &reactionRow{entry: e})
+				out = append(out, &reactionRow{entry: e, reactors: r.reactorMap[e.Name]})
 			}
 		}
 	}
@@ -229,12 +255,49 @@ func (r *ReactionPicker) layoutRow(gtx layout.Context, th *Theme, idx int, row *
 				Left:   unit.Dp(12),
 				Right:  unit.Dp(12),
 			}.Layout(gtx, func(gtx layout.Context) layout.Dimensions {
-				lbl := material.Body1(th.Mat, row.entry.Glyph+"  :"+row.entry.Name+":")
-				lbl.Color = color
-				if active {
-					lbl.Font.Weight = font.SemiBold
-				}
-				return lbl.Layout(gtx)
+				return layout.Flex{Alignment: layout.Middle}.Layout(gtx,
+					layout.Rigid(func(gtx layout.Context) layout.Dimensions {
+						if strings.HasPrefix(row.entry.Glyph, "http") {
+							imgOp, ok, done := r.images.GetOp(row.entry.Glyph)
+							if !done {
+								gtx.Constraints.Min = image.Point{X: gtx.Dp(20), Y: gtx.Dp(20)}
+								return layout.Dimensions{Size: gtx.Constraints.Min}
+							}
+							if ok {
+								target := gtx.Dp(20)
+								size := imgOp.Size()
+								scale := float32(target) / float32(max(size.X, size.Y))
+								dx := (float32(target) - float32(size.X)*scale) / 2
+								dy := (float32(target) - float32(size.Y)*scale) / 2
+
+								stack := op.Affine(f32.Affine2D{}.Scale(f32.Pt(0, 0), f32.Pt(scale, scale)).Offset(f32.Pt(dx/scale, dy/scale))).Push(gtx.Ops)
+								imgOp.Add(gtx.Ops)
+								paint.PaintOp{}.Add(gtx.Ops)
+								stack.Pop()
+								return layout.Dimensions{Size: image.Point{X: target, Y: target}}
+							}
+						}
+						glyph := material.Body1(th.Mat, row.entry.Glyph)
+						glyph.Color = color
+						if active {
+							glyph.Font.Weight = font.SemiBold
+						}
+						return glyph.Layout(gtx)
+					}),
+					layout.Rigid(layout.Spacer{Width: unit.Dp(8)}.Layout),
+					layout.Rigid(func(gtx layout.Context) layout.Dimensions {
+						text := ":" + row.entry.Name + ":"
+						if row.reactors != "" {
+							text += " (" + row.reactors + ")"
+						}
+						lbl := material.Body1(th.Mat, text)
+						lbl.Color = color
+						if active {
+							lbl.Font.Weight = font.SemiBold
+						}
+						return lbl.Layout(gtx)
+					}),
+				)
 			})
 		})
 	}

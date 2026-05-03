@@ -24,6 +24,8 @@ type SettingsScreen struct {
 	
 	toggleSidebar widget.Clickable
 	toggleMain    widget.Clickable
+	toggleRecent  widget.Clickable
+	toggleHideEmpty widget.Clickable
 }
 
 type settingsRow struct {
@@ -43,6 +45,7 @@ func newSettingsScreen(th *Theme, onChange, onClose func()) *SettingsScreen {
 		{label: "Channels sidebar", target: &th.Fonts.Channels},
 		{label: "Channel header", target: &th.Fonts.Header},
 		{label: "Messages", target: &th.Fonts.Messages},
+		{label: "Thread replies", target: &th.Fonts.Threads},
 		{label: "Composer", target: &th.Fonts.Composer},
 		{label: "Code", target: &th.Fonts.Code, mono: true},
 		{label: "Search (ctrl+k)", target: &th.Fonts.Search},
@@ -115,6 +118,14 @@ func (s *SettingsScreen) Layout(gtx layout.Context) layout.Dimensions {
 		th.ApplyThemePrefs(th.ThemeSidebar, th.ThemeMain)
 		dirty = true
 	}
+	if s.toggleRecent.Clicked(gtx) {
+		th.ShowOnlyRecentChannels = !th.ShowOnlyRecentChannels
+		dirty = true
+	}
+	if s.toggleHideEmpty.Clicked(gtx) {
+		th.HideEmptyChannels = !th.HideEmptyChannels
+		dirty = true
+	}
 
 	for _, r := range s.rows {
 		if r.prevF.Clicked(gtx) {
@@ -178,7 +189,7 @@ func (s *SettingsScreen) Layout(gtx layout.Context) layout.Dimensions {
 func (s *SettingsScreen) layoutThemeToggles(gtx layout.Context, th *Theme) layout.Dimensions {
 	return layout.Flex{Axis: layout.Vertical}.Layout(gtx,
 		layout.Rigid(func(gtx layout.Context) layout.Dimensions {
-			lbl := material.Body1(th.Mat, "Theme")
+			lbl := material.Body1(th.Mat, "Preferences")
 			lbl.Color = th.Pal.TextStrong
 			lbl.Font.Weight = font.SemiBold
 			return lbl.Layout(gtx)
@@ -189,7 +200,7 @@ func (s *SettingsScreen) layoutThemeToggles(gtx layout.Context, th *Theme) layou
 				layout.Rigid(func(gtx layout.Context) layout.Dimensions {
 					lbl := material.Body2(th.Mat, "Left Panel (Sidebar)")
 					lbl.Color = th.Pal.TextDim
-					gtx.Constraints.Min.X = gtx.Dp(unit.Dp(140))
+					gtx.Constraints.Min.X = gtx.Dp(unit.Dp(160))
 					return lbl.Layout(gtx)
 				}),
 				layout.Rigid(func(gtx layout.Context) layout.Dimensions {
@@ -203,11 +214,47 @@ func (s *SettingsScreen) layoutThemeToggles(gtx layout.Context, th *Theme) layou
 				layout.Rigid(func(gtx layout.Context) layout.Dimensions {
 					lbl := material.Body2(th.Mat, "Right Panel (Main)")
 					lbl.Color = th.Pal.TextDim
-					gtx.Constraints.Min.X = gtx.Dp(unit.Dp(140))
+					gtx.Constraints.Min.X = gtx.Dp(unit.Dp(160))
 					return lbl.Layout(gtx)
 				}),
 				layout.Rigid(func(gtx layout.Context) layout.Dimensions {
 					return s.button(gtx, th, &s.toggleMain, th.ThemeMain)
+				}),
+			)
+		}),
+		layout.Rigid(layout.Spacer{Height: unit.Dp(6)}.Layout),
+		layout.Rigid(func(gtx layout.Context) layout.Dimensions {
+			return layout.Flex{Alignment: layout.Middle}.Layout(gtx,
+				layout.Rigid(func(gtx layout.Context) layout.Dimensions {
+					lbl := material.Body2(th.Mat, "Limit groups to 10 recent")
+					lbl.Color = th.Pal.TextDim
+					gtx.Constraints.Min.X = gtx.Dp(unit.Dp(160))
+					return lbl.Layout(gtx)
+				}),
+				layout.Rigid(func(gtx layout.Context) layout.Dimensions {
+					label := "off"
+					if th.ShowOnlyRecentChannels {
+						label = "on"
+					}
+					return s.button(gtx, th, &s.toggleRecent, label)
+				}),
+			)
+		}),
+		layout.Rigid(layout.Spacer{Height: unit.Dp(6)}.Layout),
+		layout.Rigid(func(gtx layout.Context) layout.Dimensions {
+			return layout.Flex{Alignment: layout.Middle}.Layout(gtx,
+				layout.Rigid(func(gtx layout.Context) layout.Dimensions {
+					lbl := material.Body2(th.Mat, "Hide empty channels")
+					lbl.Color = th.Pal.TextDim
+					gtx.Constraints.Min.X = gtx.Dp(unit.Dp(160))
+					return lbl.Layout(gtx)
+				}),
+				layout.Rigid(func(gtx layout.Context) layout.Dimensions {
+					label := "off"
+					if th.HideEmptyChannels {
+						label = "on"
+					}
+					return s.button(gtx, th, &s.toggleHideEmpty, label)
 				}),
 			)
 		}),

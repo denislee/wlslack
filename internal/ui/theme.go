@@ -36,14 +36,16 @@ type Palette struct {
 	Unread      color.NRGBA
 	Border      color.NRGBA
 	BorderStrong color.NRGBA
-	Staging     color.NRGBA
-	Production  color.NRGBA
+	Staging      color.NRGBA
+	Production   color.NRGBA
 	Resolved    color.NRGBA
 	Firing      color.NRGBA
+	PresenceActive color.NRGBA
+	PresenceAway   color.NRGBA
 	Selection   color.NRGBA
-}
+	}
 
-func darkPalette() Palette {
+	func darkPalette() Palette {
 	return Palette{
 		Bg:           rgb(0x0f1115),
 		BgSidebar:    rgb(0x0b0c10),
@@ -66,11 +68,13 @@ func darkPalette() Palette {
 		Production:   rgb(0xff9f3a),
 		Resolved:     rgb(0x4cc38a),
 		Firing:       rgb(0xef476f),
+		PresenceActive: rgb(0x4cc38a),
+		PresenceAway:   rgb(0x5e6571),
 		Selection:    rgb(0x5294ff),
 	}
-}
+	}
 
-func lightPalette() Palette {
+	func lightPalette() Palette {
 	return Palette{
 		Bg:           rgb(0xffffff),
 		BgSidebar:    rgb(0xf4f5f7),
@@ -93,9 +97,11 @@ func lightPalette() Palette {
 		Production:   rgb(0xff9f3a),
 		Resolved:     rgb(0x4cc38a),
 		Firing:       rgb(0xef476f),
+		PresenceActive: rgb(0x4cc38a),
+		PresenceAway:   rgb(0x8a93a0),
 		Selection:    rgb(0xa1c4ff),
 	}
-}
+	}
 
 // FontStyle is the per-section typeface + size used when rendering labels.
 // Face "" or Size 0 means "fall back to the theme default".
@@ -111,6 +117,7 @@ type SectionFonts struct {
 	Channels FontStyle
 	Header   FontStyle
 	Messages FontStyle
+	Threads  FontStyle
 	Composer FontStyle
 	Code     FontStyle
 	Search   FontStyle
@@ -138,6 +145,9 @@ type Theme struct {
 	// Fonts holds the live per-section overrides. Settings mutates this in
 	// place; the next Layout pass picks up the new values.
 	Fonts SectionFonts
+
+	ShowOnlyRecentChannels bool
+	HideEmptyChannels      bool
 }
 
 func newTheme() *Theme {
@@ -181,6 +191,7 @@ func newTheme() *Theme {
 			Channels: uiDefault,
 			Header:   uiDefault,
 			Messages: uiDefault,
+			Threads:  uiDefault,
 			Composer: uiDefault,
 			Code:     monoDefault,
 		},
@@ -235,6 +246,7 @@ func (t *Theme) ApplyFontPrefs(p sectionPrefs) {
 	apply(&t.Fonts.Channels, p.Channels)
 	apply(&t.Fonts.Header, p.Header)
 	apply(&t.Fonts.Messages, p.Messages)
+	apply(&t.Fonts.Threads, p.Threads)
 	apply(&t.Fonts.Composer, p.Composer)
 	apply(&t.Fonts.Code, p.Code)
 	apply(&t.Fonts.Search, p.Search)
@@ -266,6 +278,7 @@ type sectionPrefs struct {
 	Channels FontStyle
 	Header   FontStyle
 	Messages FontStyle
+	Threads  FontStyle
 	Composer FontStyle
 	Code     FontStyle
 	Search   FontStyle

@@ -7,14 +7,16 @@ import (
 )
 
 type UIState struct {
-	SidebarVisible  bool              `json:"sidebar_visible"`
-	UnreadOnly      bool              `json:"unread_only"`
-	Favorites       []string          `json:"favorites"`
-	CollapsedGroups []string          `json:"collapsed_groups"`
-	ReadTimestamps  map[string]string `json:"read_timestamps"`
-	Fonts           FontPrefs         `json:"fonts"`
-	ThemeSidebar    string            `json:"theme_sidebar"`
-	ThemeMain       string            `json:"theme_main"`
+	SidebarVisible         bool              `json:"sidebar_visible"`
+	UnreadOnly             bool              `json:"unread_only"`
+	ShowOnlyRecentChannels bool              `json:"show_only_recent_channels"`
+	HideEmptyChannels      bool              `json:"hide_empty_channels"`
+	Favorites              []string          `json:"favorites"`
+	CollapsedGroups        []string          `json:"collapsed_groups"`
+	ReadTimestamps         map[string]string `json:"read_timestamps"`
+	Fonts                  FontPrefs         `json:"fonts"`
+	ThemeSidebar           string            `json:"theme_sidebar"`
+	ThemeMain              string            `json:"theme_main"`
 }
 
 // FontPrefs holds per-section typeface and size overrides. Zero values mean
@@ -23,6 +25,7 @@ type FontPrefs struct {
 	Channels FontPref `json:"channels"`
 	Header   FontPref `json:"header"`
 	Messages FontPref `json:"messages"`
+	Threads  FontPref `json:"threads"`
 	Composer FontPref `json:"composer"`
 	Code     FontPref `json:"code"`
 	Search   FontPref `json:"search"`
@@ -37,8 +40,10 @@ type FontPref struct {
 func DefaultUIState() UIState {
 	return UIState{
 		SidebarVisible:  false,
-		UnreadOnly:      true,
-		Favorites:       []string{},
+		UnreadOnly:             true,
+		ShowOnlyRecentChannels: false,
+		HideEmptyChannels:      false,
+		Favorites:              []string{},
 		CollapsedGroups: []string{},
 		ReadTimestamps:  make(map[string]string),
 		ThemeSidebar:    "dark",
