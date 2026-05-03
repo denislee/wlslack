@@ -476,6 +476,7 @@ func (c *Client) GetThreadReplies(channelID, threadTS string) ([]Message, error)
 }
 
 func (c *Client) SendMessage(channelID, text string) error {
+	text = MarkdownToMrkdwn(text)
 	_, _, err := c.api.PostMessage(
 		channelID,
 		slackapi.MsgOptionText(text, false),
@@ -487,6 +488,7 @@ func (c *Client) SendMessage(channelID, text string) error {
 }
 
 func (c *Client) UpdateMessage(channelID, timestamp, text string) error {
+	text = MarkdownToMrkdwn(text)
 	_, _, _, err := c.api.UpdateMessage(
 		channelID,
 		timestamp,
@@ -507,6 +509,7 @@ func (c *Client) DeleteMessage(channelID, timestamp string) error {
 }
 
 func (c *Client) SendThreadReply(channelID, threadTS, text string) error {
+	text = MarkdownToMrkdwn(text)
 	_, _, err := c.api.PostMessage(
 		channelID,
 		slackapi.MsgOptionText(text, false),
