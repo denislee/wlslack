@@ -1278,11 +1278,15 @@ func (a *App) onChannelSelectWithContext(id string, ts string) {
 	if ch := a.client.Cache().GetChannel(id); ch != nil {
 		a.messages.SetHeader(ch.Name, ch.Topic)
 		if ch.UnreadCount > 0 && ch.LatestTS != "" {
-			go func() {
-				if err := a.client.MarkChannel(ch.ID, ch.LatestTS); err != nil {
-					slog.Debug("MarkChannel failed", "channel", ch.ID, "error", err)
+			// Optimistically clear the unread count in cache
+			a.client.Cache().SetChannelUnread(ch.ID, 0, 0, ch.LatestTS, ch.LatestTS)
+			a.channels.SetChannels(a.client.Cache().GetAllChannels())
+			
+			go func(channelID, latestTS string) {
+				if err := a.client.MarkChannel(channelID, latestTS); err != nil {
+					slog.Debug("MarkChannel failed", "channel", channelID, "error", err)
 				}
-			}()
+			}(ch.ID, ch.LatestTS)
 		}
 	}
 	// Show whatever is already cached immediately, then trigger a fresh fetch.
@@ -1577,17 +1581,31 @@ func (a *App) fetchMessages(id string) {
 
 	// Update LatestTS and MentionCount in cache if we found newer messages
 	changed := false
+	var lastTS string
 	if len(msgs) > 0 {
-		last := msgs[len(msgs)-1]
-		if last.Timestamp > ch.LatestTS {
-			a.client.Cache().AdvanceChannelLatestTS(id, last.Timestamp)
+		lastTS = msgs[len(msgs)-1].Timestamp
+		if lastTS > ch.LatestTS {
+			a.client.Cache().AdvanceChannelLatestTS(id, lastTS)
 			changed = true
+			// Refresh our local copy of ch to have the updated LatestTS
+			ch = a.client.Cache().GetChannel(id)
 		}
 	}
-	if ch.MentionCount != mentionsFound {
+
+	isActive := a.getActiveID() == id && !a.viewingContext
+	if isActive && lastTS != "" && (ch.UnreadCount > 0 || lastTS > ch.LastReadTS) {
+		a.client.Cache().SetChannelUnread(id, 0, 0, lastTS, lastTS)
+		changed = true
+		go func(channelID, timestamp string) {
+			if err := a.client.MarkChannel(channelID, timestamp); err != nil {
+				slog.Debug("MarkChannel failed", "channel", channelID, "error", err)
+			}
+		}(id, lastTS)
+	} else if !isActive && ch.MentionCount != mentionsFound {
 		a.client.Cache().SetChannelUnread(id, ch.UnreadCount, mentionsFound, ch.LastReadTS, ch.LatestTS)
 		changed = true
 	}
+
 	if changed {
 		a.channels.SetChannels(a.client.Cache().GetAllChannels())
 	}
