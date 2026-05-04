@@ -250,6 +250,7 @@ func (r *ReactionPicker) Layout(gtx layout.Context, th *Theme) layout.Dimensions
 				}),
 				layout.Rigid(func(gtx layout.Context) layout.Dimensions {
 					hint := material.Caption(th.Mat, "type to filter · ↑/↓ select · Enter react · Esc cancel")
+					th.applyFont(&hint, FontStyle{})
 					hint.Color = th.Pal.TextMuted
 					return layout.Inset{Top: unit.Dp(4), Bottom: unit.Dp(12)}.Layout(gtx, hint.Layout)
 				}),
@@ -316,6 +317,7 @@ func (r *ReactionPicker) layoutRow(gtx layout.Context, th *Theme, idx int, row *
 							}
 						}
 						glyph := material.Body1(th.Mat, row.entry.Glyph)
+						th.applyFont(&glyph, FontStyle{})
 						glyph.Color = color
 						if active {
 							glyph.Font.Weight = font.SemiBold
@@ -329,6 +331,7 @@ func (r *ReactionPicker) layoutRow(gtx layout.Context, th *Theme, idx int, row *
 							text += " (" + row.reactors + ")"
 						}
 						lbl := material.Body1(th.Mat, text)
+						th.applyFont(&lbl, FontStyle{})
 						lbl.Color = color
 						if active {
 							lbl.Font.Weight = font.SemiBold

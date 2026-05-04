@@ -220,7 +220,7 @@ func (c *Cache) GetChannel(id string) *Channel {
 	return c.channels[id]
 }
 
-func (c *Cache) SetChannelUnread(id string, unreadCount int, lastReadTS, latestTS string) {
+func (c *Cache) SetChannelUnread(id string, unreadCount, mentionCount int, lastReadTS, latestTS string) {
 	c.mu.Lock()
 	existing, ok := c.channels[id]
 	if !ok {
@@ -229,6 +229,7 @@ func (c *Cache) SetChannelUnread(id string, unreadCount int, lastReadTS, latestT
 	}
 	updated := *existing
 	updated.UnreadCount = unreadCount
+	updated.MentionCount = mentionCount
 	updated.LastReadTS = lastReadTS
 	if latestTS != "" {
 		updated.LatestTS = latestTS
@@ -237,7 +238,7 @@ func (c *Cache) SetChannelUnread(id string, unreadCount int, lastReadTS, latestT
 	c.mu.Unlock()
 
 	if c.store != nil {
-		if err := c.store.updateChannelUnread(id, unreadCount, lastReadTS, latestTS); err != nil {
+		if err := c.store.updateChannelUnread(id, unreadCount, mentionCount, lastReadTS, latestTS); err != nil {
 			slog.Debug("persist unread failed", "channel", id, "error", err)
 		}
 	}

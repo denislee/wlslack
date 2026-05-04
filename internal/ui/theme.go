@@ -35,6 +35,8 @@ type Palette struct {
 	Mention     color.NRGBA
 	Link        color.NRGBA
 	Unread      color.NRGBA
+	UnreadBadge  color.NRGBA
+	MentionBadge color.NRGBA
 	Border      color.NRGBA
 	BorderStrong color.NRGBA
 	Staging      color.NRGBA
@@ -44,9 +46,9 @@ type Palette struct {
 	PresenceActive color.NRGBA
 	PresenceAway   color.NRGBA
 	Selection   color.NRGBA
-	}
+}
 
-	func darkPalette() Palette {
+func darkPalette() Palette {
 	return Palette{
 		Bg:           rgb(0x0f1115),
 		BgSidebar:    rgb(0x0b0c10),
@@ -63,7 +65,9 @@ type Palette struct {
 		AccentText:   rgb(0xffffff),
 		Mention:      rgb(0xf5b342),
 		Link:         rgb(0x7aa9ff),
-		Unread:       rgb(0xef476f),
+		Unread:       rgb(0x8a93a0), // Gray for general unreads
+		UnreadBadge:  rgb(0x8a93a0), // Gray
+		MentionBadge: rgb(0xef476f), // Red
 		Border:       rgb(0x1c2027),
 		BorderStrong: rgb(0x262b33),
 		Staging:      rgb(0x6cb1ff),
@@ -74,9 +78,9 @@ type Palette struct {
 		PresenceAway:   rgb(0x5e6571),
 		Selection:    rgb(0x5294ff),
 	}
-	}
+}
 
-	func lightPalette() Palette {
+func lightPalette() Palette {
 	return Palette{
 		Bg:           rgb(0xffffff),
 		BgSidebar:    rgb(0xf4f5f7),
@@ -93,7 +97,9 @@ type Palette struct {
 		AccentText:   rgb(0xffffff),
 		Mention:      rgb(0x0052cc),
 		Link:         rgb(0x0052cc),
-		Unread:       rgb(0xef476f),
+		Unread:       rgb(0x5e6571), // Gray for general unreads
+		UnreadBadge:  rgb(0x8a93a0), // Gray
+		MentionBadge: rgb(0xef476f), // Red
 		Border:       rgb(0xeef0f3),
 		BorderStrong: rgb(0xd7dae0),
 		Staging:      rgb(0x6cb1ff),
@@ -104,7 +110,7 @@ type Palette struct {
 		PresenceAway:   rgb(0x8a93a0),
 		Selection:    rgb(0xa1c4ff),
 	}
-	}
+}
 
 // FontStyle is the per-section typeface + size used when rendering labels.
 // Face "" or Size 0 means "fall back to the theme default".
@@ -117,6 +123,7 @@ type FontStyle struct {
 // Adding a section here means: surface it in the Settings screen, add a
 // FontPref field in config.FontPrefs, and apply it in the relevant component.
 type SectionFonts struct {
+	Global   FontStyle
 	Channels FontStyle
 	Header   FontStyle
 	Messages FontStyle
@@ -125,6 +132,7 @@ type SectionFonts struct {
 	Code     FontStyle
 	Search   FontStyle
 	UserInfo FontStyle
+	StatusBar FontStyle
 }
 
 // Theme bundles the gioui Material theme with our palette.
@@ -151,6 +159,7 @@ type Theme struct {
 
 	ShowOnlyRecentChannels bool
 	HideEmptyChannels      bool
+	ShowStatusBar          bool
 }
 
 func newTheme() *Theme {
@@ -178,8 +187,8 @@ func newTheme() *Theme {
 
 	faces, monoFaces := uniqueFaces(collection)
 
-	uiDefault := FontStyle{Size: 13}
-	monoDefault := FontStyle{Face: monoFace, Size: 13}
+	uiDefault := FontStyle{}
+	monoDefault := FontStyle{Face: monoFace}
 
 	return &Theme{
 		Mat:          mat,
@@ -193,6 +202,7 @@ func newTheme() *Theme {
 		Faces:        faces,
 		MonoFaces:    monoFaces,
 		Fonts: SectionFonts{
+			Global:   FontStyle{Size: 13},
 			Channels: uiDefault,
 			Header:   uiDefault,
 			Messages: uiDefault,
@@ -200,41 +210,69 @@ func newTheme() *Theme {
 			Composer: uiDefault,
 			Code:     monoDefault,
 		},
+		ShowStatusBar: true,
 	}
 }
 
 // applyFont mutates a material.LabelStyle to honor a section's typeface and
 // size, leaving zero fields untouched so theme defaults survive.
 func (t *Theme) applyFont(lbl *material.LabelStyle, fs FontStyle) {
-	if fs.Face != "" {
-		lbl.Font.Typeface = font.Typeface(fs.Face)
+	face := fs.Face
+	if face == "" {
+		face = t.Fonts.Global.Face
 	}
-	if fs.Size > 0 {
-		lbl.TextSize = unit.Sp(fs.Size)
+	if face != "" {
+		lbl.Font.Typeface = font.Typeface(face)
+	}
+
+	size := fs.Size
+	if size == 0 {
+		size = t.Fonts.Global.Size
+	}
+	if size > 0 {
+		lbl.TextSize = unit.Sp(size)
 	}
 }
 
 func (t *Theme) applyEditorFont(ed *material.EditorStyle, fs FontStyle) {
-	if fs.Face != "" {
-		ed.Font.Typeface = font.Typeface(fs.Face)
+	face := fs.Face
+	if face == "" {
+		face = t.Fonts.Global.Face
 	}
-	if fs.Size > 0 {
-		ed.TextSize = unit.Sp(fs.Size)
+	if face != "" {
+		ed.Font.Typeface = font.Typeface(face)
+	}
+
+	size := fs.Size
+	if size == 0 {
+		size = t.Fonts.Global.Size
+	}
+	if size > 0 {
+		ed.TextSize = unit.Sp(size)
 	}
 }
 
 // FontFor returns the font.Font + size to use for a non-material widget (e.g.
 // richtext spans) for the given section.
 func (t *Theme) FontFor(fs FontStyle) (font.Font, unit.Sp) {
+	face := fs.Face
+	if face == "" {
+		face = t.Fonts.Global.Face
+	}
 	f := font.Font{}
-	if fs.Face != "" {
-		f.Typeface = font.Typeface(fs.Face)
+	if face != "" {
+		f.Typeface = font.Typeface(face)
 	}
-	size := t.Mat.TextSize
-	if fs.Size > 0 {
-		size = unit.Sp(fs.Size)
+
+	size := fs.Size
+	if size == 0 {
+		size = t.Fonts.Global.Size
 	}
-	return f, size
+	s := t.Mat.TextSize
+	if size > 0 {
+		s = unit.Sp(size)
+	}
+	return f, s
 }
 
 // ApplyFontPrefs overlays user prefs onto the theme defaults. Called at boot
@@ -248,6 +286,7 @@ func (t *Theme) ApplyFontPrefs(p sectionPrefs) {
 			target.Size = pref.Size
 		}
 	}
+	apply(&t.Fonts.Global, p.Global)
 	apply(&t.Fonts.Channels, p.Channels)
 	apply(&t.Fonts.Header, p.Header)
 	apply(&t.Fonts.Messages, p.Messages)
@@ -256,6 +295,11 @@ func (t *Theme) ApplyFontPrefs(p sectionPrefs) {
 	apply(&t.Fonts.Code, p.Code)
 	apply(&t.Fonts.Search, p.Search)
 	apply(&t.Fonts.UserInfo, p.UserInfo)
+	apply(&t.Fonts.StatusBar, p.StatusBar)
+
+	if t.Fonts.Global.Size > 0 {
+		t.Mat.TextSize = unit.Sp(t.Fonts.Global.Size)
+	}
 }
 
 func (t *Theme) ApplyThemePrefs(sidebarTheme, mainTheme string) {
@@ -287,6 +331,7 @@ func (t *Theme) ApplyThemePrefs(sidebarTheme, mainTheme string) {
 // sectionPrefs mirrors config.FontPrefs without importing it here, so the
 // ui package stays self-contained for tests.
 type sectionPrefs struct {
+	Global   FontStyle
 	Channels FontStyle
 	Header   FontStyle
 	Messages FontStyle
@@ -295,6 +340,7 @@ type sectionPrefs struct {
 	Code     FontStyle
 	Search   FontStyle
 	UserInfo FontStyle
+	StatusBar FontStyle
 }
 
 // uniqueFaces collapses the loaded font collection into a sorted, deduplicated

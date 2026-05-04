@@ -109,7 +109,7 @@ func (f *Formatter) FormatSpans(text string) []Span {
 	return f.tokenize(text)
 }
 
-func (f *Formatter) parseTimestamp(ts string) (time.Time, bool) {
+func ParseTimestamp(ts string) (time.Time, bool) {
 	parts := strings.SplitN(ts, ".", 2)
 	if len(parts) == 0 {
 		return time.Time{}, false
@@ -123,7 +123,7 @@ func (f *Formatter) parseTimestamp(ts string) (time.Time, bool) {
 
 // FormatTimestamp converts a Slack timestamp to a human-readable time with age.
 func (f *Formatter) FormatTimestamp(ts string) string {
-	t, ok := f.parseTimestamp(ts)
+	t, ok := ParseTimestamp(ts)
 	if !ok {
 		return ts
 	}
@@ -140,7 +140,7 @@ func (f *Formatter) FormatTimestamp(ts string) string {
 }
 
 func (f *Formatter) FormatTimestampAge(ts string) string {
-	t, ok := f.parseTimestamp(ts)
+	t, ok := ParseTimestamp(ts)
 	if !ok {
 		return ts
 	}
@@ -149,7 +149,7 @@ func (f *Formatter) FormatTimestampAge(ts string) string {
 
 // FormatTimeOnly returns a formatted date/time string — used in message headers.
 func (f *Formatter) FormatTimeOnly(ts string) string {
-	t, ok := f.parseTimestamp(ts)
+	t, ok := ParseTimestamp(ts)
 	if !ok {
 		return ts
 	}
@@ -395,6 +395,12 @@ func ExtractURLs(text string) []string {
 		if len(m) >= 2 && !seen[m[1]] {
 			urls = append(urls, m[1])
 			seen[m[1]] = true
+		}
+	}
+	for _, m := range reBareURL.FindAllString(text, -1) {
+		if !seen[m] {
+			urls = append(urls, m)
+			seen[m] = true
 		}
 	}
 	return urls

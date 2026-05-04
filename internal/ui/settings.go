@@ -26,6 +26,7 @@ type SettingsScreen struct {
 	toggleMain    widget.Clickable
 	toggleRecent  widget.Clickable
 	toggleHideEmpty widget.Clickable
+	toggleStatusBar widget.Clickable
 }
 
 type settingsRow struct {
@@ -42,6 +43,7 @@ func newSettingsScreen(th *Theme, onChange, onClose func()) *SettingsScreen {
 	s := &SettingsScreen{th: th, onChange: onChange, onClose: onClose}
 	s.list.Axis = layout.Vertical
 	s.rows = []*settingsRow{
+		{label: "Global Font (Base)", target: &th.Fonts.Global},
 		{label: "Channels sidebar", target: &th.Fonts.Channels},
 		{label: "Channel header", target: &th.Fonts.Header},
 		{label: "Messages", target: &th.Fonts.Messages},
@@ -50,6 +52,7 @@ func newSettingsScreen(th *Theme, onChange, onClose func()) *SettingsScreen {
 		{label: "Code", target: &th.Fonts.Code, mono: true},
 		{label: "Search (ctrl+k)", target: &th.Fonts.Search},
 		{label: "User profile panel", target: &th.Fonts.UserInfo},
+		{label: "Status Bar", target: &th.Fonts.StatusBar},
 	}
 	return s
 }
@@ -126,6 +129,10 @@ func (s *SettingsScreen) Layout(gtx layout.Context) layout.Dimensions {
 		th.HideEmptyChannels = !th.HideEmptyChannels
 		dirty = true
 	}
+	if s.toggleStatusBar.Clicked(gtx) {
+		th.ShowStatusBar = !th.ShowStatusBar
+		dirty = true
+	}
 
 	for _, r := range s.rows {
 		if r.prevF.Clicked(gtx) {
@@ -190,6 +197,7 @@ func (s *SettingsScreen) layoutThemeToggles(gtx layout.Context, th *Theme) layou
 	return layout.Flex{Axis: layout.Vertical}.Layout(gtx,
 		layout.Rigid(func(gtx layout.Context) layout.Dimensions {
 			lbl := material.Body1(th.Mat, "Preferences")
+			th.applyFont(&lbl, FontStyle{})
 			lbl.Color = th.Pal.TextStrong
 			lbl.Font.Weight = font.SemiBold
 			return lbl.Layout(gtx)
@@ -199,6 +207,7 @@ func (s *SettingsScreen) layoutThemeToggles(gtx layout.Context, th *Theme) layou
 			return layout.Flex{Alignment: layout.Middle}.Layout(gtx,
 				layout.Rigid(func(gtx layout.Context) layout.Dimensions {
 					lbl := material.Body2(th.Mat, "Left Panel (Sidebar)")
+					th.applyFont(&lbl, FontStyle{})
 					lbl.Color = th.Pal.TextDim
 					gtx.Constraints.Min.X = gtx.Dp(unit.Dp(160))
 					return lbl.Layout(gtx)
@@ -213,6 +222,7 @@ func (s *SettingsScreen) layoutThemeToggles(gtx layout.Context, th *Theme) layou
 			return layout.Flex{Alignment: layout.Middle}.Layout(gtx,
 				layout.Rigid(func(gtx layout.Context) layout.Dimensions {
 					lbl := material.Body2(th.Mat, "Right Panel (Main)")
+					th.applyFont(&lbl, FontStyle{})
 					lbl.Color = th.Pal.TextDim
 					gtx.Constraints.Min.X = gtx.Dp(unit.Dp(160))
 					return lbl.Layout(gtx)
@@ -227,6 +237,7 @@ func (s *SettingsScreen) layoutThemeToggles(gtx layout.Context, th *Theme) layou
 			return layout.Flex{Alignment: layout.Middle}.Layout(gtx,
 				layout.Rigid(func(gtx layout.Context) layout.Dimensions {
 					lbl := material.Body2(th.Mat, "Limit groups to 10 recent")
+					th.applyFont(&lbl, FontStyle{})
 					lbl.Color = th.Pal.TextDim
 					gtx.Constraints.Min.X = gtx.Dp(unit.Dp(160))
 					return lbl.Layout(gtx)
@@ -245,6 +256,7 @@ func (s *SettingsScreen) layoutThemeToggles(gtx layout.Context, th *Theme) layou
 			return layout.Flex{Alignment: layout.Middle}.Layout(gtx,
 				layout.Rigid(func(gtx layout.Context) layout.Dimensions {
 					lbl := material.Body2(th.Mat, "Hide empty channels")
+					th.applyFont(&lbl, FontStyle{})
 					lbl.Color = th.Pal.TextDim
 					gtx.Constraints.Min.X = gtx.Dp(unit.Dp(160))
 					return lbl.Layout(gtx)
@@ -258,6 +270,25 @@ func (s *SettingsScreen) layoutThemeToggles(gtx layout.Context, th *Theme) layou
 				}),
 			)
 		}),
+		layout.Rigid(layout.Spacer{Height: unit.Dp(6)}.Layout),
+		layout.Rigid(func(gtx layout.Context) layout.Dimensions {
+			return layout.Flex{Alignment: layout.Middle}.Layout(gtx,
+				layout.Rigid(func(gtx layout.Context) layout.Dimensions {
+					lbl := material.Body2(th.Mat, "Show Status Bar")
+					th.applyFont(&lbl, FontStyle{})
+					lbl.Color = th.Pal.TextDim
+					gtx.Constraints.Min.X = gtx.Dp(unit.Dp(160))
+					return lbl.Layout(gtx)
+				}),
+				layout.Rigid(func(gtx layout.Context) layout.Dimensions {
+					label := "off"
+					if th.ShowStatusBar {
+						label = "on"
+					}
+					return s.button(gtx, th, &s.toggleStatusBar, label)
+				}),
+			)
+		}),
 	)
 }
 
@@ -265,6 +296,7 @@ func (s *SettingsScreen) layoutHeader(gtx layout.Context, th *Theme) layout.Dime
 	return layout.Flex{Alignment: layout.Middle}.Layout(gtx,
 		layout.Rigid(func(gtx layout.Context) layout.Dimensions {
 			lbl := material.H6(th.Mat, "Settings · Fonts")
+			th.applyFont(&lbl, FontStyle{})
 			lbl.Color = th.Pal.TextStrong
 			lbl.Font.Weight = font.Bold
 			return lbl.Layout(gtx)
@@ -282,6 +314,7 @@ func (s *SettingsScreen) layoutRow(gtx layout.Context, th *Theme, r *settingsRow
 			return layout.Flex{Axis: layout.Vertical}.Layout(gtx,
 				layout.Rigid(func(gtx layout.Context) layout.Dimensions {
 					lbl := material.Body1(th.Mat, r.label)
+					th.applyFont(&lbl, FontStyle{})
 					lbl.Color = th.Pal.TextStrong
 					lbl.Font.Weight = font.SemiBold
 					return lbl.Layout(gtx)
@@ -311,6 +344,7 @@ func (s *SettingsScreen) layoutFaceControls(gtx layout.Context, th *Theme, r *se
 	return layout.Flex{Alignment: layout.Middle}.Layout(gtx,
 		layout.Rigid(func(gtx layout.Context) layout.Dimensions {
 			lbl := material.Body2(th.Mat, "Face")
+			th.applyFont(&lbl, FontStyle{})
 			lbl.Color = th.Pal.TextDim
 			gtx.Constraints.Min.X = gtx.Dp(unit.Dp(48))
 			return lbl.Layout(gtx)
@@ -320,6 +354,7 @@ func (s *SettingsScreen) layoutFaceControls(gtx layout.Context, th *Theme, r *se
 		layout.Rigid(layout.Spacer{Width: unit.Dp(6)}.Layout),
 		layout.Flexed(1, func(gtx layout.Context) layout.Dimensions {
 			lbl := material.Body1(th.Mat, face)
+			th.applyFont(&lbl, FontStyle{})
 			lbl.Color = th.Pal.Text
 			return lbl.Layout(gtx)
 		}),
@@ -336,6 +371,7 @@ func (s *SettingsScreen) layoutSizeControls(gtx layout.Context, th *Theme, r *se
 	return layout.Flex{Alignment: layout.Middle}.Layout(gtx,
 		layout.Rigid(func(gtx layout.Context) layout.Dimensions {
 			lbl := material.Body2(th.Mat, "Size")
+			th.applyFont(&lbl, FontStyle{})
 			lbl.Color = th.Pal.TextDim
 			gtx.Constraints.Min.X = gtx.Dp(unit.Dp(48))
 			return lbl.Layout(gtx)
@@ -345,6 +381,7 @@ func (s *SettingsScreen) layoutSizeControls(gtx layout.Context, th *Theme, r *se
 		layout.Rigid(layout.Spacer{Width: unit.Dp(6)}.Layout),
 		layout.Flexed(1, func(gtx layout.Context) layout.Dimensions {
 			lbl := material.Body1(th.Mat, display)
+			th.applyFont(&lbl, FontStyle{})
 			lbl.Color = th.Pal.Text
 			return lbl.Layout(gtx)
 		}),
@@ -376,6 +413,7 @@ func (s *SettingsScreen) button(gtx layout.Context, th *Theme, c *widget.Clickab
 					Right:  unit.Dp(10),
 				}.Layout(gtx, func(gtx layout.Context) layout.Dimensions {
 					lbl := material.Body2(th.Mat, label)
+					th.applyFont(&lbl, FontStyle{})
 					lbl.Color = th.Pal.Text
 					return lbl.Layout(gtx)
 				})

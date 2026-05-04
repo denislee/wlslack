@@ -3,9 +3,13 @@ package ui
 import (
 	"fmt"
 	"image"
+	"image/gif"
+	"time"
 
 	"gioui.org/font"
 	"gioui.org/layout"
+	"gioui.org/op"
+	"gioui.org/op/paint"
 	"gioui.org/unit"
 	"gioui.org/widget"
 	"gioui.org/widget/material"
@@ -83,15 +87,22 @@ func (v *ImageViewer) Layout(gtx layout.Context, th *Theme) layout.Dimensions {
 }
 
 func (v *ImageViewer) layoutImage(gtx layout.Context, th *Theme, f slack.File) layout.Dimensions {
-	op, hasOp, done := v.images.GetOp(f.PreferredImageURL())
+	url := f.PreferredImageURL()
+	if g, done := v.images.GetGif(url); done && g != nil && len(g.Image) > 1 {
+		return v.layoutGif(gtx, th, g)
+	}
+
+	op, hasOp, done := v.images.GetOp(url)
 	if !done {
 		lbl := material.Body2(th.Mat, "loading "+f.Name+"…")
+		th.applyFont(&lbl, FontStyle{})
 		lbl.Color = th.Pal.TextDim
 		return lbl.Layout(gtx)
 	}
 	if !hasOp {
 		lbl := material.Body2(th.Mat, f.Name+" (failed to load)")
-		lbl.Color = th.Pal.TextDim
+		th.applyFont(&lbl, FontStyle{})
+		lbl.Color = th.Pal.Firing
 		return lbl.Layout(gtx)
 	}
 	sz := op.Size()
@@ -122,6 +133,59 @@ func (v *ImageViewer) layoutImage(gtx layout.Context, th *Theme, f slack.File) l
 	return w.Layout(gtx)
 }
 
+func (v *ImageViewer) layoutGif(gtx layout.Context, th *Theme, g *gif.GIF) layout.Dimensions {
+	var totalDuration time.Duration
+	for _, d := range g.Delay {
+		totalDuration += time.Duration(d) * 10 * time.Millisecond
+	}
+	if totalDuration <= 0 {
+		totalDuration = 100 * time.Millisecond
+	}
+
+	rem := gtx.Now.Sub(time.Time{}) % totalDuration
+	var currentFrame int
+	var frameStart time.Duration
+	for i, d := range g.Delay {
+		dura := time.Duration(d) * 10 * time.Millisecond
+		if rem < frameStart+dura {
+			currentFrame = i
+			break
+		}
+		frameStart += dura
+	}
+
+	img := g.Image[currentFrame]
+	imgOp := paint.NewImageOp(img)
+	sz := imgOp.Size()
+
+	maxPxW, maxPxH := gtx.Constraints.Max.X, gtx.Constraints.Max.Y
+	scale := float32(maxPxW) / float32(sz.X)
+	if s := float32(maxPxH) / float32(sz.Y); s < scale {
+		scale = s
+	}
+	target := image.Point{
+		X: int(float32(sz.X) * scale),
+		Y: int(float32(sz.Y) * scale),
+	}
+	if target.X < 1 || target.Y < 1 {
+		return layout.Dimensions{}
+	}
+
+	gtx.Constraints = layout.Exact(target)
+
+	// Schedule next frame
+	nextFrameDelay := time.Duration(g.Delay[currentFrame]) * 10 * time.Millisecond
+	nextFrameAt := gtx.Now.Add(frameStart + nextFrameDelay - rem)
+	gtx.Execute(op.InvalidateCmd{At: nextFrameAt})
+
+	w := widget.Image{
+		Src:      imgOp,
+		Fit:      widget.Contain,
+		Position: layout.Center,
+	}
+	return w.Layout(gtx)
+}
+
 func (v *ImageViewer) layoutFooter(gtx layout.Context, th *Theme, f slack.File) layout.Dimensions {
 	hint := "Esc close"
 	if v.HasMultiple() {
@@ -131,12 +195,14 @@ func (v *ImageViewer) layoutFooter(gtx layout.Context, th *Theme, f slack.File) 
 	return layout.Flex{Axis: layout.Vertical, Alignment: layout.Middle}.Layout(gtx,
 		layout.Rigid(func(gtx layout.Context) layout.Dimensions {
 			lbl := material.Body2(th.Mat, caption)
+			th.applyFont(&lbl, FontStyle{})
 			lbl.Color = th.Pal.TextStrong
 			lbl.Font.Weight = font.Medium
 			return lbl.Layout(gtx)
 		}),
 		layout.Rigid(func(gtx layout.Context) layout.Dimensions {
 			lbl := material.Caption(th.Mat, hint)
+			th.applyFont(&lbl, FontStyle{})
 			lbl.Color = th.Pal.TextMuted
 			return lbl.Layout(gtx)
 		}),

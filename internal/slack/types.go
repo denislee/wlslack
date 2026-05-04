@@ -10,14 +10,17 @@ type Channel struct {
 	IsExternal  bool // ext-shared / org-shared with another workspace
 	Topic       string
 	Purpose     string
-	UnreadCount int
-	LastReadTS  string
+	UnreadCount  int
+	MentionCount int
+	LastReadTS   string
 	LatestTS    string
 	LatestTSVerified bool
 }
 
 type Message struct {
 	Timestamp   string
+	ChannelID   string // for consolidated views
+	ChannelName string // for consolidated views
 	UserID      string
 	Username    string
 	Text        string

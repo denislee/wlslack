@@ -2,10 +2,13 @@ package ui
 
 import (
 	"context"
+	"fmt"
 	"io"
 	"log/slog"
 	"os"
 	"os/exec"
+	"path/filepath"
+	"sort"
 	"strings"
 	"sync"
 	"sync/atomic"
@@ -18,6 +21,7 @@ import (
 	"gioui.org/layout"
 	"gioui.org/op"
 	"gioui.org/unit"
+	"gioui.org/widget/material"
 
 	"github.com/user/wlslack/internal/config"
 	"github.com/user/wlslack/internal/slack"
@@ -53,7 +57,8 @@ type App struct {
 	mu          sync.Mutex
 	channelList []slack.Channel
 
-	activeID atomic.Value // string
+	activeID       atomic.Value // string
+	viewingContext bool
 
 	// keyTag is the focus target for app-level shortcuts (j/k navigation).
 	// Bare struct{} is fine — we only use its address.
@@ -62,12 +67,12 @@ type App struct {
 	// UI mode flags. Mutated from goroutines, read on the UI thread; the
 	// reads happen during Layout while writes trigger Invalidate, so a frame
 	// boundary acts as the sync point.
-	switcherOpen        bool
-	linkPickerOpen      bool
-	imageViewerOpen     bool
-	messageEditorOpen   bool
-	reactionPickerOpen  bool
-	settingsOpen        bool
+	switcherOpen       bool
+	linkPickerOpen     bool
+	imageViewerOpen    bool
+	messageEditorOpen  bool
+	reactionPickerOpen bool
+	settingsOpen       bool
 
 	// Channel + timestamp captured when the reaction picker opens, so the
 	// emoji selection still targets the right message even if the chat view
@@ -85,7 +90,7 @@ type App struct {
 	pendFocusKeyTag         bool
 	pendFocusSwitcher       bool
 	pendFocusReactionPicker bool
-	pendFocusMessageEditor bool
+	pendFocusMessageEditor  bool
 
 	// composerVisible toggles the bottom input row. The composer auto-hides
 	// when it loses focus and reappears when the user presses 'i'.
@@ -94,6 +99,8 @@ type App struct {
 	// before focus has had a chance to take effect.
 	composerVisible    bool
 	composerWasFocused bool
+
+	backgroundTasks map[string]string // ID -> description
 }
 
 // Run blocks running the GUI until the window is closed.
@@ -120,11 +127,13 @@ func Run(client *slack.Client, cfg *config.Config) error {
 	a.th.ApplyThemePrefs(state.ThemeSidebar, state.ThemeMain)
 	a.th.ShowOnlyRecentChannels = state.ShowOnlyRecentChannels
 	a.th.HideEmptyChannels = state.HideEmptyChannels
+	a.th.ShowStatusBar = state.ShowStatusBar
+	a.backgroundTasks = make(map[string]string)
 	a.channels.SetFavorites(state.Favorites, a.onFavoritesChanged)
 	a.channels.SetCollapsedGroups(state.CollapsedGroups, a.onCollapsedGroupsChanged)
 	a.messages = newMessagesView(images)
 	a.composer = newComposer()
-	a.switcher = newQuickSwitcher(a.onSwitcherSelect)
+	a.switcher = newQuickSwitcher(a.onSwitcherSelect, a.onSwitcherSearch)
 	a.linkPicker = newLinkPicker(a.onLinkPickerSelect)
 	a.imageViewer = newImageViewer(images)
 	a.messageEditor = newMessageEditor()
@@ -140,6 +149,8 @@ func Run(client *slack.Client, cfg *config.Config) error {
 }
 
 func (a *App) pollEmojis() {
+	a.startTask("emojis", "Fetching emojis")
+	defer a.endTask("emojis")
 	emojis, err := a.client.GetEmoji()
 	if err != nil {
 		slog.Error("GetEmoji failed", "error", err)
@@ -168,70 +179,131 @@ func (a *App) loop() error {
 	}
 }
 
+func (a *App) startTask(id, desc string) {
+	a.mu.Lock()
+	defer a.mu.Unlock()
+	a.backgroundTasks[id] = desc
+	a.w.Invalidate()
+}
+
+func (a *App) endTask(id string) {
+	a.mu.Lock()
+	defer a.mu.Unlock()
+	delete(a.backgroundTasks, id)
+	a.w.Invalidate()
+}
+
+func (a *App) layoutStatusBar(gtx layout.Context) layout.Dimensions {
+	a.mu.Lock()
+	tasks := make([]string, 0, len(a.backgroundTasks))
+	for _, desc := range a.backgroundTasks {
+		tasks = append(tasks, desc)
+	}
+	a.mu.Unlock()
+
+	sort.Strings(tasks)
+	msg := ""
+	if len(tasks) > 0 {
+		msg = "Working: " + strings.Join(tasks, ", ")
+	} else {
+		msg = "Ready"
+	}
+
+	return withBorder(gtx, a.th.Pal.Border, borders{Top: true}, func(gtx layout.Context) layout.Dimensions {
+		return paintedBg(gtx, a.th.Pal.BgSidebar, func(gtx layout.Context) layout.Dimensions {
+			return layout.Inset{
+				Top:    unit.Dp(2),
+				Bottom: unit.Dp(2),
+				Left:   unit.Dp(10),
+				Right:  unit.Dp(10),
+			}.Layout(gtx, func(gtx layout.Context) layout.Dimensions {
+				lbl := material.Caption(a.th.Mat, msg)
+				a.th.applyFont(&lbl, a.th.Fonts.StatusBar)
+				lbl.Color = a.th.Pal.TextDim
+				if len(tasks) > 0 {
+					lbl.Color = a.th.Pal.Accent
+				}
+				return lbl.Layout(gtx)
+			})
+		})
+	})
+}
+
 func (a *App) layout(gtx layout.Context) layout.Dimensions {
 	a.applyPendingFocus(gtx)
 	a.handleKeys(gtx)
 
-	return layout.Flex{Axis: layout.Horizontal}.Layout(gtx,
-		layout.Rigid(func(gtx layout.Context) layout.Dimensions {
-			gtx.Constraints.Min.X = gtx.Dp(unit.Dp(240))
-			gtx.Constraints.Max.X = gtx.Dp(unit.Dp(240))
-			return a.channels.Layout(gtx, a.th, a.fmt)
-		}),
+	return layout.Flex{Axis: layout.Vertical}.Layout(gtx,
 		layout.Flexed(1, func(gtx layout.Context) layout.Dimensions {
-			if a.settingsOpen {
-				return a.settings.Layout(gtx)
-			}
-			if a.switcherOpen {
-				return a.switcher.Layout(gtx, a.th)
-			}
-			if a.linkPickerOpen {
-				return a.linkPicker.Layout(gtx, a.th)
-			}
-			if a.imageViewerOpen {
-				return a.imageViewer.Layout(gtx, a.th)
-			}
-			if a.messageEditorOpen {
-				return a.messageEditor.Layout(gtx, a.th)
-			}
-			if a.reactionPickerOpen {
-				return a.reactionPicker.Layout(gtx, a.th)
-			}
-			// Auto-hide the composer when blurred. composerVisible is flipped
-			// on 'i' (to bring it back) and cleared once focus has actually
-			// left the editor — checked via gtx.Source.Focused below.
-			if a.composerVisible && !gtx.Source.Focused(&a.composer.editor) && a.initFocused {
-				// Defer the hide by one frame after focus is dispatched: on
-				// the very first 'i' press, composerVisible is set during the
-				// same frame the FocusCmd is queued, so Focused() still
-				// reports false here. We only hide once the editor has been
-				// focused at least once and then lost focus.
-				if a.composerWasFocused {
-					a.composerVisible = false
-					a.composerWasFocused = false
-				}
-			}
-			if gtx.Source.Focused(&a.composer.editor) {
-				a.composerWasFocused = true
-			}
-			return layout.Flex{Axis: layout.Vertical}.Layout(gtx,
-				layout.Flexed(1, func(gtx layout.Context) layout.Dimensions {
-					return a.messages.Layout(gtx, a.th, a.fmt)
-				}),
+			return layout.Flex{Axis: layout.Horizontal}.Layout(gtx,
 				layout.Rigid(func(gtx layout.Context) layout.Dimensions {
-					if !a.composerVisible {
-						return layout.Dimensions{}
+					gtx.Constraints.Min.X = gtx.Dp(unit.Dp(240))
+					gtx.Constraints.Max.X = gtx.Dp(unit.Dp(240))
+					return a.channels.Layout(gtx, a.th, a.fmt)
+				}),
+				layout.Flexed(1, func(gtx layout.Context) layout.Dimensions {
+					if a.settingsOpen {
+						return a.settings.Layout(gtx)
 					}
-					placeholder := "Message"
-					if id := a.getActiveID(); id != "" {
-						if ch := a.client.Cache().GetChannel(id); ch != nil {
-							placeholder = "Message #" + ch.Name
+					if a.switcherOpen {
+						return a.switcher.Layout(gtx, a.th)
+					}
+					if a.linkPickerOpen {
+						return a.linkPicker.Layout(gtx, a.th)
+					}
+					if a.imageViewerOpen {
+						return a.imageViewer.Layout(gtx, a.th)
+					}
+					if a.messageEditorOpen {
+						return a.messageEditor.Layout(gtx, a.th)
+					}
+					if a.reactionPickerOpen {
+						return a.reactionPicker.Layout(gtx, a.th)
+					}
+
+					// Auto-hide the composer when blurred. composerVisible is flipped
+					// on 'i' (to bring it back) and cleared once focus has actually
+					// left the editor — checked via gtx.Source.Focused below.
+					if a.composerVisible && !gtx.Source.Focused(&a.composer.editor) && a.initFocused {
+						// Defer the hide by one frame after focus is dispatched: on
+						// the very first 'i' press, composerVisible is set during the
+						// same frame the FocusCmd is queued, so Focused() still
+						// reports false here. We only hide once the editor has been
+						// focused at least once and then lost focus.
+						if a.composerWasFocused {
+							a.composerVisible = false
+							a.composerWasFocused = false
 						}
 					}
-					gtx.Constraints.Min.X = gtx.Constraints.Max.X
-					return a.composer.Layout(gtx, a.th, a.fmt, placeholder, a.onSend)
+					if gtx.Source.Focused(&a.composer.editor) {
+						a.composerWasFocused = true
+					}
+					return layout.Flex{Axis: layout.Vertical}.Layout(gtx,
+						layout.Flexed(1, func(gtx layout.Context) layout.Dimensions {
+							return a.messages.Layout(gtx, a.th, a.fmt)
+						}),
+						layout.Rigid(func(gtx layout.Context) layout.Dimensions {
+							if !a.composerVisible {
+								return layout.Dimensions{}
+							}
+							placeholder := "Message"
+							if id := a.getActiveID(); id != "" {
+								if ch := a.client.Cache().GetChannel(id); ch != nil {
+									placeholder = "Message #" + ch.Name
+								}
+							}
+							gtx.Constraints.Min.X = gtx.Constraints.Max.X
+							return a.composer.Layout(gtx, a.th, a.fmt, placeholder, a.onSend)
+						}),
+					)
 				}),
 			)
+		}),
+		layout.Rigid(func(gtx layout.Context) layout.Dimensions {
+			if !a.th.ShowStatusBar {
+				return layout.Dimensions{}
+			}
+			return a.layoutStatusBar(gtx)
 		}),
 	)
 }
@@ -293,8 +365,10 @@ func (a *App) handleKeys(gtx layout.Context) {
 			key.Filter{Focus: switcherEditor, Name: key.NameUpArrow},
 			key.Filter{Focus: switcherEditor, Name: key.NameDownArrow},
 			key.Filter{Focus: switcherEditor, Name: key.NameReturn},
+			key.Filter{Focus: switcherEditor, Name: key.NameTab},
 			key.Filter{Focus: switcherEditor, Name: "N", Required: key.ModCtrl},
 			key.Filter{Focus: switcherEditor, Name: "P", Required: key.ModCtrl},
+			key.Filter{Focus: switcherEditor, Name: "Y", Required: key.ModCtrl},
 			key.Filter{Focus: switcherEditor, Name: "W", Required: key.ModCtrl},
 			key.Filter{Focus: switcherEditor, Name: "A", Required: key.ModCtrl},
 			key.Filter{Focus: switcherEditor, Name: "E", Required: key.ModCtrl},
@@ -312,6 +386,7 @@ func (a *App) handleKeys(gtx layout.Context) {
 			key.Filter{Focus: reactionEditor, Name: key.NameReturn},
 			key.Filter{Focus: reactionEditor, Name: "N", Required: key.ModCtrl},
 			key.Filter{Focus: reactionEditor, Name: "P", Required: key.ModCtrl},
+			key.Filter{Focus: reactionEditor, Name: "Y", Required: key.ModCtrl},
 			key.Filter{Focus: reactionEditor, Name: "W", Required: key.ModCtrl},
 			key.Filter{Focus: reactionEditor, Name: "A", Required: key.ModCtrl},
 			key.Filter{Focus: reactionEditor, Name: "E", Required: key.ModCtrl},
@@ -340,6 +415,7 @@ func (a *App) handleKeys(gtx layout.Context) {
 				key.Filter{Focus: &a.composer.editor, Name: key.NameTab},
 				key.Filter{Focus: &a.composer.editor, Name: "N", Required: key.ModCtrl},
 				key.Filter{Focus: &a.composer.editor, Name: "P", Required: key.ModCtrl},
+				key.Filter{Focus: &a.composer.editor, Name: "Y", Required: key.ModCtrl},
 			)
 		}
 	}
@@ -355,7 +431,7 @@ func (a *App) handleKeys(gtx layout.Context) {
 			key.Filter{Name: "H"},
 			key.Filter{Name: "L"},
 			key.Filter{Name: "E"},
-			key.Filter{Name: "D"},
+			key.Filter{Name: "D", Optional: key.ModShift},
 			key.Filter{Name: "Y"},
 			key.Filter{Name: "R", Optional: key.ModShift},
 			key.Filter{Name: "Q"},
@@ -371,6 +447,8 @@ func (a *App) handleKeys(gtx layout.Context) {
 		filters = append(filters,
 			key.Filter{Name: key.NameEscape},
 			key.Filter{Name: "[", Required: key.ModCtrl},
+			key.Filter{Name: "H"},
+			key.Filter{Name: "Q"},
 			key.Filter{Name: key.NameUpArrow},
 			key.Filter{Name: key.NameDownArrow},
 			key.Filter{Name: key.NameLeftArrow},
@@ -447,9 +525,12 @@ func (a *App) handleKeys(gtx layout.Context) {
 			}
 		case kev.Name == key.NameReturn && a.focusPane == paneMessages && !a.switcherOpen && !a.reactionPickerOpen:
 			if ts := a.messages.DeletePendingTS(); ts != "" {
-				_, msgTS, ok := a.messages.SelectedMessage()
+				msg, msgTS, ok := a.messages.SelectedMessage()
 				if ok && msgTS == ts {
 					ch := a.getActiveID()
+					if ch == "__UNREADS__" && msg.ChannelID != "" {
+						ch = msg.ChannelID
+					}
 					if a.messages.InThread() {
 						ch, _ = a.messages.ThreadInfo()
 					}
@@ -461,11 +542,34 @@ func (a *App) handleKeys(gtx layout.Context) {
 			}
 			a.openSelectedLinks()
 		case kev.Name == "D":
+			if kev.Modifiers.Contain(key.ModShift) {
+				if a.focusPane != paneMessages {
+					a.startTask("download_err", "Focus the messages pane (l) to download attachments")
+					go func() { time.Sleep(3 * time.Second); a.endTask("download_err") }()
+					break
+				}
+				msg, _, ok := a.messages.SelectedMessage()
+				if !ok {
+					a.startTask("download_err", "Select a message to download attachments")
+					go func() { time.Sleep(3 * time.Second); a.endTask("download_err") }()
+					break
+				}
+				if len(msg.Files) == 0 {
+					a.startTask("download_err", "Selected message has no attachments")
+					go func() { time.Sleep(3 * time.Second); a.endTask("download_err") }()
+					break
+				}
+				go a.downloadAttachments(msg)
+				break
+			}
 			if a.focusPane == paneMessages {
 				msg, ts, ok := a.messages.SelectedMessage()
 				if ok && msg.UserID == a.client.GetSelfID() {
 					if a.messages.DeletePendingTS() == ts {
 						ch := a.getActiveID()
+						if ch == "__UNREADS__" && msg.ChannelID != "" {
+							ch = msg.ChannelID
+						}
 						if a.messages.InThread() {
 							ch, _ = a.messages.ThreadInfo()
 						}
@@ -501,8 +605,11 @@ func (a *App) handleKeys(gtx layout.Context) {
 		case a.switcherOpen && kev.Name == "C" && kev.Modifiers.Contain(key.ModCtrl):
 			a.switcher.Clear()
 			a.w.Invalidate()
-		case a.switcherOpen && kev.Name == key.NameReturn:
+		case a.switcherOpen && (kev.Name == key.NameReturn || (kev.Name == "Y" && kev.Modifiers.Contain(key.ModCtrl))):
 			a.switcher.Submit()
+		case a.switcherOpen && kev.Name == key.NameTab:
+			a.switcher.ToggleTab()
+			a.w.Invalidate()
 		case a.reactionPickerOpen && (kev.Name == key.NameUpArrow || (kev.Name == "P" && kev.Modifiers.Contain(key.ModCtrl))):
 			a.reactionPicker.MoveSelection(-1)
 			a.w.Invalidate()
@@ -539,6 +646,8 @@ func (a *App) handleKeys(gtx layout.Context) {
 		case composerFocused && kev.Name == "T" && kev.Modifiers.Contain(key.ModCtrl):
 			a.composer.TranslateToEnglish(func(text string, done func(string, error)) {
 				go func() {
+					a.startTask("translate", "Translating")
+					defer a.endTask("translate")
 					translated, err := translate.ToEnglish(context.Background(), text)
 					if err != nil {
 						slog.Error("translate failed", "error", err)
@@ -557,10 +666,10 @@ func (a *App) handleKeys(gtx layout.Context) {
 		case composerFocused && a.composer.mentionPicker.Active() && (kev.Name == key.NameDownArrow || (kev.Name == "N" && kev.Modifiers.Contain(key.ModCtrl))):
 			a.composer.mentionPicker.MoveSelection(1)
 			a.w.Invalidate()
-		case composerFocused && a.composer.mentionPicker.Active() && (kev.Name == key.NameReturn || kev.Name == key.NameTab):
+		case composerFocused && a.composer.mentionPicker.Active() && (kev.Name == key.NameReturn || kev.Name == key.NameTab || (kev.Name == "Y" && kev.Modifiers.Contain(key.ModCtrl))):
 			a.composer.mentionPicker.Submit()
 			a.w.Invalidate()
-		case a.reactionPickerOpen && kev.Name == key.NameReturn:
+		case a.reactionPickerOpen && (kev.Name == key.NameReturn || (kev.Name == "Y" && kev.Modifiers.Contain(key.ModCtrl))):
 			a.reactionPicker.Submit()
 		case kev.Name == "J":
 			switch {
@@ -595,19 +704,23 @@ func (a *App) handleKeys(gtx layout.Context) {
 		case kev.Name == "B" && kev.Modifiers.Contain(key.ModCtrl):
 			a.pageInPane(-1)
 		case kev.Name == "H":
-			// h peels back one layer at a time: author panel → thread →
-			// channels-pane focus. This keeps h/l symmetrical with the
+			// h peels back one layer at a time: link picker → author panel →
+			// thread → channels-pane focus. This keeps h/l symmetrical with the
 			// l-to-drill-in progression.
 			switch {
+			case a.linkPickerOpen:
+				a.closeLinkPicker()
 			case a.imageViewerOpen:
 				a.closeImageViewer()
-			case a.messages.CloseAuthor():
+			case a.messages.AuthorOpen():
+				a.messages.CloseAuthor()
 				a.w.Invalidate()
 			case a.messages.CloseThread():
 				a.w.Invalidate()
 			default:
 				a.setFocusPane(paneChannels)
 			}
+
 		case kev.Name == "L":
 			// Drill-in progression on the messages pane:
 			//   channel-history selection → thread view
@@ -674,9 +787,12 @@ func (a *App) handleKeys(gtx layout.Context) {
 				a.openSettings()
 			}
 		case kev.Name == "Q":
-			if a.imageViewerOpen {
+			switch {
+			case a.linkPickerOpen:
+				a.closeLinkPicker()
+			case a.imageViewerOpen:
 				a.closeImageViewer()
-			} else {
+			default:
 				os.Exit(0)
 			}
 		}
@@ -697,11 +813,27 @@ func (a *App) closeSwitcher() {
 	a.w.Invalidate()
 }
 
-func (a *App) onSwitcherSelect(id string) {
-	a.onChannelSelect(id)
-	a.messages.FocusLast()
+func (a *App) onSwitcherSelect(id string, ts string) {
+	a.onChannelSelectWithContext(id, ts)
+	if ts != "" {
+		a.messages.FocusMessage(ts)
+	} else {
+		a.messages.FocusLast()
+	}
 	a.setFocusPane(paneMessages)
 	a.closeSwitcher()
+}
+
+func (a *App) onSwitcherSearch(query string) {
+	go func() {
+		results, err := a.client.Search(query)
+		if err != nil {
+			slog.Error("search failed", "error", err)
+			return
+		}
+		a.switcher.SetResults(results)
+		a.w.Invalidate()
+	}()
 }
 
 // openSelectedLinks runs Enter on the highlighted message. Resolution order:
@@ -781,6 +913,9 @@ func (a *App) openReactionPicker() {
 		return
 	}
 	chID := a.getActiveID()
+	if chID == "__UNREADS__" && msg.ChannelID != "" {
+		chID = msg.ChannelID
+	}
 	if chID == "" {
 		return
 	}
@@ -826,6 +961,9 @@ func (a *App) echoReactions() {
 		return
 	}
 	chID := a.getActiveID()
+	if chID == "__UNREADS__" && msg.ChannelID != "" {
+		chID = msg.ChannelID
+	}
 	if chID == "" {
 		return
 	}
@@ -884,6 +1022,59 @@ func (a *App) refreshAfterReaction(chID, ts string) {
 		a.w.Invalidate()
 	}
 	_ = ts
+}
+
+func (a *App) pickDirectory() (string, error) {
+	// Try zenity first
+	cmd := exec.Command("zenity", "--file-selection", "--directory", "--title=Select Download Directory")
+	out, err := cmd.Output()
+	if err == nil {
+		return strings.TrimSpace(string(out)), nil
+	}
+	// Fallback to kdialog
+	cmd = exec.Command("kdialog", "--getexistingdirectory")
+	out, err = cmd.Output()
+	if err == nil {
+		return strings.TrimSpace(string(out)), nil
+	}
+	return "", fmt.Errorf("no directory picker available (install zenity or kdialog)")
+}
+
+func (a *App) downloadAttachments(msg slack.Message) {
+	dir, err := a.pickDirectory()
+	if err != nil {
+		slog.Error("pick directory failed", "error", err)
+		a.startTask("download_err", "Download failed: "+err.Error())
+		go func() {
+			time.Sleep(5 * time.Second)
+			a.endTask("download_err")
+		}()
+		return
+	}
+	if dir == "" {
+		return
+	}
+
+	a.startTask("download", fmt.Sprintf("Downloading %d files", len(msg.Files)))
+	defer a.endTask("download")
+
+	for _, f := range msg.Files {
+		if f.URL == "" {
+			continue
+		}
+		dest := filepath.Join(dir, f.Name)
+		// Handle duplicate filenames
+		if _, err := os.Stat(dest); err == nil {
+			ext := filepath.Ext(f.Name)
+			base := strings.TrimSuffix(f.Name, ext)
+			dest = filepath.Join(dir, fmt.Sprintf("%s_%s%s", base, time.Now().Format("150405"), ext))
+		}
+
+		err := a.client.DownloadFile(f.URL, dest)
+		if err != nil {
+			slog.Error("download failed", "file", f.Name, "error", err)
+		}
+	}
 }
 
 func (a *App) deleteMessage(ch, ts string) {
@@ -959,6 +1150,7 @@ func (a *App) onFontsChanged() {
 	state.ThemeMain = a.th.ThemeMain
 	state.ShowOnlyRecentChannels = a.th.ShowOnlyRecentChannels
 	state.HideEmptyChannels = a.th.HideEmptyChannels
+	state.ShowStatusBar = a.th.ShowStatusBar
 	config.SaveUIState(state)
 	a.w.Invalidate()
 }
@@ -968,28 +1160,32 @@ func (a *App) onFontsChanged() {
 func prefsFromState(p config.FontPrefs) sectionPrefs {
 	conv := func(f config.FontPref) FontStyle { return FontStyle{Face: f.Face, Size: f.Size} }
 	return sectionPrefs{
-		Channels: conv(p.Channels),
-		Header:   conv(p.Header),
-		Messages: conv(p.Messages),
-		Threads:  conv(p.Threads),
-		Composer: conv(p.Composer),
-		Code:     conv(p.Code),
-		Search:   conv(p.Search),
-		UserInfo: conv(p.UserInfo),
+		Global:    conv(p.Global),
+		Channels:  conv(p.Channels),
+		Header:    conv(p.Header),
+		Messages:  conv(p.Messages),
+		Threads:   conv(p.Threads),
+		Composer:  conv(p.Composer),
+		Code:      conv(p.Code),
+		Search:    conv(p.Search),
+		UserInfo:  conv(p.UserInfo),
+		StatusBar: conv(p.StatusBar),
 	}
 }
 
 func stateFromTheme(th *Theme) config.FontPrefs {
 	conv := func(f FontStyle) config.FontPref { return config.FontPref{Face: f.Face, Size: f.Size} }
 	return config.FontPrefs{
-		Channels: conv(th.Fonts.Channels),
-		Header:   conv(th.Fonts.Header),
-		Messages: conv(th.Fonts.Messages),
-		Threads:  conv(th.Fonts.Threads),
-		Composer: conv(th.Fonts.Composer),
-		Code:     conv(th.Fonts.Code),
-		Search:   conv(th.Fonts.Search),
-		UserInfo: conv(th.Fonts.UserInfo),
+		Global:    conv(th.Fonts.Global),
+		Channels:  conv(th.Fonts.Channels),
+		Header:    conv(th.Fonts.Header),
+		Messages:  conv(th.Fonts.Messages),
+		Threads:   conv(th.Fonts.Threads),
+		Composer:  conv(th.Fonts.Composer),
+		Code:      conv(th.Fonts.Code),
+		Search:    conv(th.Fonts.Search),
+		UserInfo:  conv(th.Fonts.UserInfo),
+		StatusBar: conv(th.Fonts.StatusBar),
 	}
 }
 
@@ -1065,17 +1261,41 @@ func (a *App) autoSelectFirst(channels []slack.Channel) {
 }
 
 func (a *App) onChannelSelect(id string) {
+	a.onChannelSelectWithContext(id, "")
+}
+
+func (a *App) onChannelSelectWithContext(id string, ts string) {
 	a.activeID.Store(id)
 	a.channels.SetActive(id)
 	a.messages.Reset()
+	if id == "__UNREADS__" {
+		a.messages.SetHeader("All Unreads", "Consolidated view of all unread messages across all channels")
+		a.messages.SetMessages(nil)
+		a.w.Invalidate()
+		go a.fetchAllUnreads()
+		return
+	}
 	if ch := a.client.Cache().GetChannel(id); ch != nil {
 		a.messages.SetHeader(ch.Name, ch.Topic)
+		if ch.UnreadCount > 0 && ch.LatestTS != "" {
+			go func() {
+				if err := a.client.MarkChannel(ch.ID, ch.LatestTS); err != nil {
+					slog.Debug("MarkChannel failed", "channel", ch.ID, "error", err)
+				}
+			}()
+		}
 	}
 	// Show whatever is already cached immediately, then trigger a fresh fetch.
 	cached := a.client.Cache().GetMessages(id)
 	a.messages.SetMessages(cached)
 	a.w.Invalidate()
-	go a.fetchMessages(id)
+	if ts != "" {
+		a.viewingContext = true
+		go a.fetchMessagesAround(id, ts)
+	} else {
+		a.viewingContext = false
+		go a.fetchMessages(id)
+	}
 }
 
 func (a *App) onSend(text string) {
@@ -1083,11 +1303,16 @@ func (a *App) onSend(text string) {
 	if id == "" {
 		return
 	}
+	a.pendFocusKeyTag = true
+	a.setFocusPane(paneMessages)
+
 	threadTS := ""
 	if a.messages.InThread() {
 		_, threadTS = a.messages.ThreadInfo()
 	}
 	go func() {
+		a.startTask("send", "Sending message")
+		defer a.endTask("send")
 		var err error
 		if threadTS != "" {
 			err = a.client.SendThreadReply(id, threadTS, text)
@@ -1124,6 +1349,8 @@ func (a *App) openThread() {
 }
 
 func (a *App) fetchThread(channelID, threadTS string) {
+	a.startTask("thread:"+channelID+":"+threadTS, "Fetching thread")
+	defer a.endTask("thread:" + channelID + ":" + threadTS)
 	msgs, err := a.client.GetThreadReplies(channelID, threadTS)
 	if err != nil {
 		slog.Error("GetThreadReplies failed", "channel", channelID, "ts", threadTS, "error", err)
@@ -1154,6 +1381,29 @@ func (a *App) getActiveID() string {
 // pollChannels refreshes the channel list, then keeps pulling on the
 // configured interval. The first refresh happens immediately so the user
 // doesn't stare at an empty sidebar.
+func (a *App) isMention(msg slack.Message) bool {
+	selfID := a.client.GetSelfID()
+	groups := a.client.Cache().GetAllUserGroups()
+
+	// User mention: <@U123>
+	if strings.Contains(msg.Text, "<@"+selfID+">") {
+		return true
+	}
+	// Group mention: <!subteam^S123|@handle>
+	for _, g := range groups {
+		if strings.Contains(msg.Text, "<!subteam^"+g.ID) {
+			return true
+		}
+	}
+	// Special mentions: <!here>, <!channel>, <!everyone>
+	if strings.Contains(msg.Text, "<!here>") ||
+		strings.Contains(msg.Text, "<!channel>") ||
+		strings.Contains(msg.Text, "<!everyone>") {
+		return true
+	}
+	return false
+}
+
 func (a *App) pollChannels() {
 	// Try cached data first for instant UI.
 	if cached, err := a.client.Cache().LoadChannelsFromDisk(); err == nil && len(cached) > 0 {
@@ -1172,6 +1422,8 @@ func (a *App) pollChannels() {
 	}()
 
 	tick := func() {
+		a.startTask("channels", "Syncing channels")
+		defer a.endTask("channels")
 		channels, err := a.client.GetChannels(a.cfg.Channels.Types, a.cfg.Channels.Pinned)
 		if err != nil {
 			slog.Error("GetChannels failed", "error", err)
@@ -1192,10 +1444,13 @@ func (a *App) pollChannels() {
 		a.autoSelectFirst(filtered)
 		a.w.Invalidate()
 
-		// IM names aren't resolved by GetChannels; do it in the background so
-		// the sidebar appears immediately, then refresh once names are in.
+		// IM and MPIM names aren't fully resolved by GetChannels; do it in the
+		// background so the sidebar appears immediately, then refresh once names
+		// are in.
 		go func(chs []slack.Channel) {
-			a.client.ResolveIMNames(chs)
+			a.startTask("resolve", "Resolving names")
+			defer a.endTask("resolve")
+			a.client.ResolveConversationNames(chs)
 			a.channels.SetChannels(chs)
 			a.w.Invalidate()
 		}(filtered)
@@ -1203,9 +1458,77 @@ func (a *App) pollChannels() {
 
 	tick()
 	t := time.NewTicker(a.cfg.Polling.ChannelList)
+	pt := time.NewTicker(a.cfg.Polling.Priority)
 	defer t.Stop()
-	for range t.C {
-		tick()
+	defer pt.Stop()
+	for {
+		select {
+		case <-t.C:
+			tick()
+		case <-pt.C:
+			// Refresh unread counts for priority channels
+			activeID := a.getActiveID()
+			priority := make([]string, 0, len(a.cfg.Channels.Pinned)+2)
+
+			if activeID == "__UNREADS__" {
+				// When looking at All Unreads, we need to know if ANY channel has new messages
+				for _, ch := range a.client.Cache().GetAllChannels() {
+					priority = append(priority, ch.ID)
+				}
+			} else {
+				priority = append(priority, a.cfg.Channels.Pinned...)
+				if activeID != "" {
+					priority = append(priority, activeID)
+				}
+				// Include channels that currently have unreads so they stay accurate
+				for _, ch := range a.client.Cache().GetAllChannels() {
+					if ch.UnreadCount > 0 {
+						priority = append(priority, ch.ID)
+					}
+				}
+			}
+
+			if len(priority) > 0 {
+				go func(ids []string) {
+					a.startTask("priority", "Updating unreads")
+					defer a.endTask("priority")
+					channels, err := a.client.GetUnreadCounts(ids)
+					if err != nil {
+						slog.Debug("GetUnreadCounts failed", "error", err)
+						return
+					}
+
+					// Perform background mention scan for any channel that has unreads
+					for _, ch := range channels {
+						if ch.UnreadCount > 0 {
+							msgs, err := a.client.GetMessages(ch.ID, 50, ch.LastReadTS)
+							if err == nil {
+								mentions := 0
+								for _, m := range msgs {
+									if a.isMention(m) {
+										mentions++
+									}
+								}
+								if cached := a.client.Cache().GetChannel(ch.ID); cached != nil {
+									if cached.MentionCount != mentions {
+										a.client.Cache().SetChannelUnread(ch.ID, ch.UnreadCount, mentions, ch.LastReadTS, ch.LatestTS)
+									}
+								}
+							}
+						}
+					}
+
+					// Update the sidebar
+					a.channels.SetChannels(a.client.Cache().GetAllChannels())
+					a.w.Invalidate()
+
+					// If we're in the All Unreads view, trigger a full refresh
+					if a.getActiveID() == "__UNREADS__" {
+						a.fetchAllUnreads()
+					}
+				}(priority)
+			}
+		}
 	}
 }
 
@@ -1219,11 +1542,17 @@ func (a *App) pollActiveChannel() {
 		if id == "" {
 			continue
 		}
-		a.fetchMessages(id)
+		if id == "__UNREADS__" {
+			a.fetchAllUnreads()
+		} else {
+			a.fetchMessages(id)
+		}
 	}
 }
 
 func (a *App) fetchMessages(id string) {
+	a.startTask("fetch:"+id, "Fetching messages")
+	defer a.endTask("fetch:" + id)
 	limit := a.cfg.Display.MessageLimit
 	if limit <= 0 {
 		limit = 50
@@ -1233,8 +1562,97 @@ func (a *App) fetchMessages(id string) {
 		slog.Error("GetMessages failed", "channel", id, "error", err)
 		return
 	}
+
+	ch := a.client.Cache().GetChannel(id)
+	if ch == nil {
+		return
+	}
+
+	mentionsFound := 0
+	for _, m := range msgs {
+		if m.Timestamp > ch.LastReadTS && a.isMention(m) {
+			mentionsFound++
+		}
+	}
+
+	// Update LatestTS and MentionCount in cache if we found newer messages
+	changed := false
+	if len(msgs) > 0 {
+		last := msgs[len(msgs)-1]
+		if last.Timestamp > ch.LatestTS {
+			a.client.Cache().AdvanceChannelLatestTS(id, last.Timestamp)
+			changed = true
+		}
+	}
+	if ch.MentionCount != mentionsFound {
+		a.client.Cache().SetChannelUnread(id, ch.UnreadCount, mentionsFound, ch.LastReadTS, ch.LatestTS)
+		changed = true
+	}
+	if changed {
+		a.channels.SetChannels(a.client.Cache().GetAllChannels())
+	}
+
+	if a.getActiveID() == id && !a.viewingContext {
+		a.messages.SetMessages(msgs)
+		a.w.Invalidate()
+	}
+}
+
+func (a *App) fetchMessagesAround(id string, ts string) {
+	a.startTask("fetch:"+id, "Fetching messages around context")
+	defer a.endTask("fetch:" + id)
+	limit := a.cfg.Display.MessageLimit
+	if limit <= 0 {
+		limit = 50
+	}
+	msgs, err := a.client.GetMessagesContext(id, limit, ts)
+	if err != nil {
+		slog.Error("GetMessagesContext failed", "channel", id, "error", err)
+		return
+	}
+
 	if a.getActiveID() == id {
 		a.messages.SetMessages(msgs)
+		a.w.Invalidate()
+	}
+}
+
+func (a *App) fetchAllUnreads() {
+	a.startTask("unreads", "Fetching unreads")
+	defer a.endTask("unreads")
+	var all []slack.Message
+	channels := a.client.Cache().GetAllChannels()
+
+	for _, ch := range channels {
+		if ch.UnreadCount > 0 {
+			msgs, err := a.client.GetMessages(ch.ID, 100, ch.LastReadTS)
+			if err != nil {
+				slog.Error("fetchAllUnreads failed", "channel", ch.ID, "error", err)
+				continue
+			}
+			mentionsFound := 0
+			for i := range msgs {
+				isDM := ch.IsIM || ch.IsMPIM
+				if isDM || a.isMention(msgs[i]) {
+					msgs[i].ChannelID = ch.ID
+					msgs[i].ChannelName = ch.Name
+					all = append(all, msgs[i])
+					mentionsFound++
+				}
+			}
+			// Update the cache with the actual mention count we found
+			if cached := a.client.Cache().GetChannel(ch.ID); cached != nil {
+				if cached.MentionCount != mentionsFound {
+					a.client.Cache().SetChannelUnread(ch.ID, cached.UnreadCount, mentionsFound, cached.LastReadTS, cached.LatestTS)
+				}
+			}
+		}
+	}
+	sort.Slice(all, func(i, j int) bool {
+		return all[i].Timestamp < all[j].Timestamp
+	})
+	if a.getActiveID() == "__UNREADS__" {
+		a.messages.SetMessages(all)
 		a.w.Invalidate()
 	}
 }

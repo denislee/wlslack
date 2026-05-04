@@ -17,6 +17,11 @@ import (
 // capital after lowercasing the rest of the translated text.
 var pronounI = regexp.MustCompile(`\bi(?:\b|(?:'))`)
 
+// slackTag matches Slack user, channel or subteam IDs, possibly with a label.
+// e.g. <@U123>, <#C123|label>, <!subteam^S123|@group>.
+// We restore the uppercase ID part.
+var slackTag = regexp.MustCompile(`(?i)<(?:@[UW]|#[CDG]|!subteam\^S)[A-Z0-9]+(?:\|[^>]+)?>`)
+
 // ToEnglish translates text to English using the unofficial Google Translate
 // endpoint. Source language is auto-detected.
 func ToEnglish(ctx context.Context, text string) (string, error) {
@@ -71,10 +76,26 @@ func ToEnglish(ctx context.Context, text string) (string, error) {
 }
 
 // normalizeCase lowercases the translated text but restores the English
-// pronoun "I" (including its contractions: I'm, I'll, I've, I'd).
+// pronoun "I" (including its contractions: I'm, I'll, I've, I'd) and
+// Slack user/channel IDs.
 func normalizeCase(s string) string {
 	lowered := strings.ToLower(s)
-	return pronounI.ReplaceAllStringFunc(lowered, func(m string) string {
+	res := pronounI.ReplaceAllStringFunc(lowered, func(m string) string {
 		return "I" + m[1:]
+	})
+	return slackTag.ReplaceAllStringFunc(res, func(m string) string {
+		if pipe := strings.Index(m, "|"); pipe != -1 {
+			prefix := ""
+			if strings.HasPrefix(strings.ToLower(m), "<!subteam^") {
+				prefix = "<!subteam^"
+				return prefix + strings.ToUpper(m[len(prefix):pipe]) + m[pipe:]
+			}
+			return strings.ToUpper(m[:pipe]) + m[pipe:]
+		}
+		if strings.HasPrefix(strings.ToLower(m), "<!subteam^") {
+			prefix := "<!subteam^"
+			return prefix + strings.ToUpper(m[len(prefix):len(m)-1]) + ">"
+		}
+		return strings.ToUpper(m)
 	})
 }

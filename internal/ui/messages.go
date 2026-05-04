@@ -4,6 +4,8 @@ import (
 	"fmt"
 	"image"
 	"image/color"
+	"image/gif"
+	"time"
 
 	"gioui.org/f32"
 	"gioui.org/font"
@@ -33,6 +35,9 @@ type MessagesView struct {
 	// row. The Ctrl+K switcher uses this to drop the user at the latest
 	// message of the channel they just jumped to.
 	pendFocusLast bool
+
+	// pendFocusTS is set by FocusMessage() when the row set is empty.
+	pendFocusTS string
 
 	// Thread mode: when active, the pane shows the parent message plus its
 	// replies instead of the channel history. j/k and selection operate on
@@ -113,6 +118,28 @@ func (m *MessagesView) FocusLast() {
 	pos.First = m.selected
 	pos.Offset = 0
 	m.list.ScrollToEnd = true
+}
+
+// FocusMessage lands selection on the message with the given timestamp.
+func (m *MessagesView) FocusMessage(ts string) {
+	if m.threadActive {
+		return
+	}
+	if len(m.rows) == 0 {
+		m.pendFocusTS = ts
+		return
+	}
+	for i, r := range m.rows {
+		if r.msg.Timestamp == ts {
+			m.selected = i
+			pos := &m.list.Position
+			pos.First = m.selected
+			pos.Offset = 0
+			m.list.ScrollToEnd = false
+			return
+		}
+	}
+	m.pendFocusTS = ts
 }
 
 // PageSize returns the number of fully visible items minus one for overlap.
@@ -202,6 +229,9 @@ func (m *MessagesView) OpenThread(channelID string) (string, string, bool) {
 		return "", "", false
 	}
 	r := m.rows[m.selected]
+	if channelID == "__UNREADS__" && r.msg.ChannelID != "" {
+		channelID = r.msg.ChannelID
+	}
 	ts := r.msg.ThreadTS
 	if ts == "" {
 		ts = r.msg.Timestamp
@@ -493,6 +523,19 @@ func (m *MessagesView) SetMessages(msgs []slack.Message) {
 		m.list.ScrollToEnd = true
 		m.pendFocusLast = false
 	}
+	if m.pendFocusTS != "" && len(m.rows) > 0 {
+		for i, r := range m.rows {
+			if r.msg.Timestamp == m.pendFocusTS {
+				m.selected = i
+				pos := &m.list.Position
+				pos.First = m.selected
+				pos.Offset = 0
+				m.list.ScrollToEnd = false
+				break
+			}
+		}
+		m.pendFocusTS = ""
+	}
 }
 
 // Layout draws the header bar plus the scrollable list. Switches between
@@ -559,7 +602,8 @@ func (m *MessagesView) layoutAuthor(gtx layout.Context, th *Theme) layout.Dimens
 			children = append(children, layout.Rigid(layout.Spacer{Height: unit.Dp(10)}.Layout))
 			children = append(children, layout.Rigid(func(gtx layout.Context) layout.Dimensions {
 				lbl := material.Caption(th.Mat, "j/k navigate · y copy · h close")
-				lbl.Color = th.Pal.TextDim
+				th.applyFont(&lbl, FontStyle{})
+				lbl.Color = th.Pal.TextMuted
 				return lbl.Layout(gtx)
 			}))
 			return layout.Flex{Axis: layout.Vertical}.Layout(gtx, children...)
@@ -780,6 +824,21 @@ func (m *MessagesView) layoutRow(gtx layout.Context, th *Theme, fmt *slack.Forma
 								th.applyFont(&lbl, th.Fonts.Messages)
 								return lbl.Layout(gtx)
 							}),
+							layout.Rigid(func(gtx layout.Context) layout.Dimensions {
+								if r.msg.ChannelName == "" {
+									return layout.Dimensions{}
+								}
+								return layout.Flex{Alignment: layout.Middle}.Layout(gtx,
+									layout.Rigid(layout.Spacer{Width: unit.Dp(8)}.Layout),
+									layout.Rigid(func(gtx layout.Context) layout.Dimensions {
+										lbl := material.Caption(th.Mat, "#"+r.msg.ChannelName)
+										lbl.Color = th.Pal.TextMuted
+										lbl.Font.Style = font.Italic
+										th.applyFont(&lbl, th.Fonts.Messages)
+										return lbl.Layout(gtx)
+									}),
+								)
+							}),
 						)
 					}),
 					// Body: styled richtext
@@ -919,7 +978,16 @@ func (m *MessagesView) layoutFiles(gtx layout.Context, th *Theme, files []slack.
 }
 
 func (m *MessagesView) layoutImage(gtx layout.Context, th *Theme, f slack.File, maxW, maxH int) layout.Dimensions {
-	op, hasOp, done := m.images.GetOp(f.ThumbnailURL())
+	url := f.ThumbnailURL()
+	if f.Mimetype == "image/gif" && f.URL != "" {
+		url = f.URL
+	}
+
+	if g, done := m.images.GetGif(url); done && g != nil && len(g.Image) > 1 {
+		return m.layoutGif(gtx, th, g, maxW, maxH)
+	}
+
+	op, hasOp, done := m.images.GetOp(url)
 	if !done {
 		lbl := material.Caption(th.Mat, "🖼  loading "+f.Name+"…")
 		lbl.Color = th.Pal.TextDim
@@ -955,6 +1023,53 @@ func (m *MessagesView) layoutImage(gtx layout.Context, th *Theme, f slack.File, 
 	gtx.Constraints = layout.Exact(target)
 	w := widget.Image{
 		Src:      op,
+		Fit:      widget.Cover,
+		Position: layout.Center,
+	}
+	return w.Layout(gtx)
+}
+
+func (m *MessagesView) layoutGif(gtx layout.Context, th *Theme, g *gif.GIF, maxW, maxH int) layout.Dimensions {
+	var totalDuration time.Duration
+	for _, d := range g.Delay {
+		totalDuration += time.Duration(d) * 10 * time.Millisecond
+	}
+	if totalDuration <= 0 {
+		totalDuration = 100 * time.Millisecond
+	}
+
+	rem := gtx.Now.Sub(time.Time{}) % totalDuration
+	var currentFrame int
+	var frameStart time.Duration
+	for i, d := range g.Delay {
+		dura := time.Duration(d) * 10 * time.Millisecond
+		if rem < frameStart+dura {
+			currentFrame = i
+			break
+		}
+		frameStart += dura
+	}
+
+	img := g.Image[currentFrame]
+	imgOp := paint.NewImageOp(img)
+
+	maxPxW := min(gtx.Constraints.Max.X, gtx.Dp(unit.Dp(maxW)))
+	maxPxH := gtx.Dp(unit.Dp(maxH))
+	sizePx := min(maxPxW, maxPxH)
+	target := image.Point{X: sizePx, Y: sizePx}
+	if target.X < 1 || target.Y < 1 {
+		return layout.Dimensions{}
+	}
+
+	gtx.Constraints = layout.Exact(target)
+
+	// Schedule next frame
+	nextFrameDelay := time.Duration(g.Delay[currentFrame]) * 10 * time.Millisecond
+	nextFrameAt := gtx.Now.Add(frameStart + nextFrameDelay - rem)
+	gtx.Execute(op.InvalidateCmd{At: nextFrameAt})
+
+	w := widget.Image{
+		Src:      imgOp,
 		Fit:      widget.Cover,
 		Position: layout.Center,
 	}

@@ -7,6 +7,7 @@ import (
 	"errors"
 	"fmt"
 	"image"
+	"image/gif"
 	// Side-effect imports register decoders so image.Decode can detect format.
 	_ "image/gif"
 	_ "image/jpeg"
@@ -56,6 +57,7 @@ type ImageLoader struct {
 
 type imageEntry struct {
 	img    image.Image
+	gif    *gif.GIF
 	op     paint.ImageOp // built once on first read; reused across frames
 	hasOp  bool
 	err    error
@@ -157,11 +159,27 @@ func (l *ImageLoader) GetOp(url string) (paint.ImageOp, bool, bool) {
 	return e.op, true, true
 }
 
+// GetGif returns the decoded GIF for url, or nil if it isn't a GIF or not loaded yet.
+func (l *ImageLoader) GetGif(url string) (*gif.GIF, bool) {
+	if url == "" {
+		return nil, true
+	}
+	l.mu.Lock()
+	defer l.mu.Unlock()
+	if e, ok := l.entries[url]; ok {
+		return e.gif, e.loaded
+	}
+	l.entries[url] = &imageEntry{}
+	go l.fetch(url)
+	return nil, false
+}
+
 func (l *ImageLoader) fetch(url string) {
-	img, err := l.load(url)
+	img, g, err := l.load(url)
 	l.mu.Lock()
 	e := l.entries[url]
 	e.img = img
+	e.gif = g
 	e.err = err
 	e.loaded = true
 	l.mu.Unlock()
@@ -174,11 +192,14 @@ func (l *ImageLoader) fetch(url string) {
 	}
 }
 
-func (l *ImageLoader) load(url string) (image.Image, error) {
+func (l *ImageLoader) load(url string) (image.Image, *gif.GIF, error) {
 	path := l.diskPath(url)
 	if data, err := os.ReadFile(path); err == nil {
+		if g, err := gif.DecodeAll(bytes.NewReader(data)); err == nil {
+			return g.Image[0], g, nil
+		}
 		if img, _, err := image.Decode(bytes.NewReader(data)); err == nil {
-			return img, nil
+			return img, nil, nil
 		}
 		// Decode failed: fall through and re-fetch, overwriting the bad cache.
 	}
@@ -200,22 +221,30 @@ func (l *ImageLoader) load(url string) (image.Image, error) {
 
 		data, err := l.fetchOnce(url)
 		if err == nil {
+			g, gerr := gif.DecodeAll(bytes.NewReader(data))
+			if gerr == nil {
+				if mkErr := os.MkdirAll(filepath.Dir(path), 0755); mkErr == nil {
+					_ = os.WriteFile(path, data, 0600)
+				}
+				return g.Image[0], g, nil
+			}
+
 			img, _, derr := image.Decode(bytes.NewReader(data))
 			if derr != nil {
-				return nil, fmt.Errorf("decode (%d bytes, head=%q): %w", len(data), peek(data), derr)
+				return nil, nil, fmt.Errorf("decode (%d bytes, head=%q): %w", len(data), peek(data), derr)
 			}
 			if mkErr := os.MkdirAll(filepath.Dir(path), 0755); mkErr == nil {
 				_ = os.WriteFile(path, data, 0600)
 			}
-			return img, nil
+			return img, nil, nil
 		}
 
 		lastErr = err
 		if !isRetryable(err) {
-			return nil, err
+			return nil, nil, err
 		}
 	}
-	return nil, fmt.Errorf("after %d attempts: %w", maxAttempts, lastErr)
+	return nil, nil, fmt.Errorf("after %d attempts: %w", maxAttempts, lastErr)
 }
 
 // retryableErr wraps a transient failure so the retry loop can recognize it

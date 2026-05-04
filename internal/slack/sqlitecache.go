@@ -48,6 +48,7 @@ func initSchema(db *sql.DB) error {
 			topic TEXT,
 			purpose TEXT,
 			unread_count INTEGER NOT NULL DEFAULT 0,
+			mention_count INTEGER NOT NULL DEFAULT 0,
 			last_read_ts TEXT,
 			latest_ts TEXT,
 			updated_at INTEGER NOT NULL
@@ -112,6 +113,7 @@ func initSchema(db *sql.DB) error {
 		`ALTER TABLE users ADD COLUMN presence TEXT`,
 		`ALTER TABLE users ADD COLUMN status_emoji TEXT`,
 		`ALTER TABLE users ADD COLUMN status_text TEXT`,
+		`ALTER TABLE channels ADD COLUMN mention_count INTEGER NOT NULL DEFAULT 0`,
 	}
 	for _, m := range migrations {
 		if _, err := db.Exec(m); err != nil && !strings.Contains(err.Error(), "duplicate column") {
@@ -254,7 +256,7 @@ func (s *sqliteStore) saveUserGroups(groups []UserGroup) error {
 func (s *sqliteStore) loadAllChannels() ([]Channel, error) {
 	rows, err := s.db.Query(`
 		SELECT id, name, user_id, is_im, is_mpim, is_private, is_external,
-		       topic, purpose, unread_count, last_read_ts, latest_ts
+		       topic, purpose, unread_count, mention_count, last_read_ts, latest_ts
 		FROM channels`)
 	if err != nil {
 		return nil, fmt.Errorf("load channels: %w", err)
@@ -267,7 +269,7 @@ func (s *sqliteStore) loadAllChannels() ([]Channel, error) {
 		var userID, topic, purpose, lastRead, latest sql.NullString
 		var isIM, isMPIM, isPrivate, isExternal int
 		if err := rows.Scan(&ch.ID, &ch.Name, &userID, &isIM, &isMPIM, &isPrivate, &isExternal,
-			&topic, &purpose, &ch.UnreadCount, &lastRead, &latest); err != nil {
+			&topic, &purpose, &ch.UnreadCount, &ch.MentionCount, &lastRead, &latest); err != nil {
 			return nil, err
 		}
 		ch.UserID = userID.String
@@ -293,8 +295,8 @@ func (s *sqliteStore) saveChannels(channels []Channel) error {
 
 	stmt, err := tx.Prepare(`
 		INSERT INTO channels (id, name, user_id, is_im, is_mpim, is_private, is_external,
-		                     topic, purpose, unread_count, last_read_ts, latest_ts, updated_at)
-		VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+		                     topic, purpose, unread_count, mention_count, last_read_ts, latest_ts, updated_at)
+		VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
 		ON CONFLICT(id) DO UPDATE SET
 			name=excluded.name,
 			user_id=excluded.user_id,
@@ -305,6 +307,7 @@ func (s *sqliteStore) saveChannels(channels []Channel) error {
 			topic=excluded.topic,
 			purpose=excluded.purpose,
 			unread_count=excluded.unread_count,
+			mention_count=excluded.mention_count,
 			last_read_ts=excluded.last_read_ts,
 			latest_ts=excluded.latest_ts,
 			updated_at=excluded.updated_at`)
@@ -317,21 +320,21 @@ func (s *sqliteStore) saveChannels(channels []Channel) error {
 	for _, ch := range channels {
 		if _, err := stmt.Exec(ch.ID, ch.Name, ch.UserID,
 			boolToInt(ch.IsIM), boolToInt(ch.IsMPIM), boolToInt(ch.IsPrivate), boolToInt(ch.IsExternal),
-			ch.Topic, ch.Purpose, ch.UnreadCount, ch.LastReadTS, ch.LatestTS, now); err != nil {
+			ch.Topic, ch.Purpose, ch.UnreadCount, ch.MentionCount, ch.LastReadTS, ch.LatestTS, now); err != nil {
 			return err
 		}
 	}
 	return tx.Commit()
 }
 
-func (s *sqliteStore) updateChannelUnread(id string, unread int, lastRead, latest string) error {
+func (s *sqliteStore) updateChannelUnread(id string, unread, mention int, lastRead, latest string) error {
 	if latest == "" {
-		_, err := s.db.Exec(`UPDATE channels SET unread_count=?, last_read_ts=? WHERE id=?`,
-			unread, lastRead, id)
+		_, err := s.db.Exec(`UPDATE channels SET unread_count=?, mention_count=?, last_read_ts=? WHERE id=?`,
+			unread, mention, lastRead, id)
 		return err
 	}
-	_, err := s.db.Exec(`UPDATE channels SET unread_count=?, last_read_ts=?, latest_ts=? WHERE id=?`,
-		unread, lastRead, latest, id)
+	_, err := s.db.Exec(`UPDATE channels SET unread_count=?, mention_count=?, last_read_ts=?, latest_ts=? WHERE id=?`,
+		unread, mention, lastRead, latest, id)
 	return err
 }
 

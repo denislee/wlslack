@@ -80,6 +80,7 @@ func (e *MessageEditor) Layout(gtx layout.Context, th *Theme) layout.Dimensions 
 						modeStr = "VISUAL"
 					}
 					title := material.Subtitle1(th.Mat, "Message Editor ["+modeStr+"]")
+					th.applyFont(&title, FontStyle{})
 					title.Color = th.Pal.TextStrong
 					title.Font.Weight = font.SemiBold
 					return title.Layout(gtx)
@@ -90,6 +91,7 @@ func (e *MessageEditor) Layout(gtx layout.Context, th *Theme) layout.Dimensions 
 						hint = "h/j/k/l select · y copy · Esc normal mode"
 					}
 					lbl := material.Caption(th.Mat, hint)
+					th.applyFont(&lbl, FontStyle{})
 					lbl.Color = th.Pal.TextMuted
 					return layout.Inset{Top: unit.Dp(4), Bottom: unit.Dp(12)}.Layout(gtx, lbl.Layout)
 				}),

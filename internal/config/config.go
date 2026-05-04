@@ -33,6 +33,7 @@ type DisplayConfig struct {
 	DateSeparator   bool
 	MessageLimit    int
 	ShowBotMessages bool
+	ShowStatusBar   bool
 	EmojiStyle      string
 	Theme           string
 }
@@ -62,6 +63,7 @@ type fileDisplay struct {
 	DateSeparator   *bool  `toml:"date_separator"`
 	MessageLimit    int    `toml:"message_limit"`
 	ShowBotMessages *bool  `toml:"show_bot_messages"`
+	ShowStatusBar   *bool  `toml:"show_status_bar"`
 	EmojiStyle      string `toml:"emoji_style"`
 	Theme           string `toml:"theme"`
 }
@@ -86,6 +88,7 @@ func defaults() Config {
 			DateSeparator:   true,
 			MessageLimit:    50,
 			ShowBotMessages: true,
+			ShowStatusBar:   true,
 			EmojiStyle:      "unicode",
 			Theme:           "default",
 		},
@@ -166,6 +169,9 @@ func loadFromFile(cfg *Config, path string) {
 	}
 	if fc.Display.ShowBotMessages != nil {
 		cfg.Display.ShowBotMessages = *fc.Display.ShowBotMessages
+	}
+	if fc.Display.ShowStatusBar != nil {
+		cfg.Display.ShowStatusBar = *fc.Display.ShowStatusBar
 	}
 	if fc.Display.EmojiStyle != "" {
 		cfg.Display.EmojiStyle = fc.Display.EmojiStyle

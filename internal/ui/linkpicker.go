@@ -100,12 +100,14 @@ func (l *LinkPicker) Layout(gtx layout.Context, th *Theme) layout.Dimensions {
 			return layout.Flex{Axis: layout.Vertical}.Layout(gtx,
 				layout.Rigid(func(gtx layout.Context) layout.Dimensions {
 					title := material.Subtitle1(th.Mat, "Open link")
+					th.applyFont(&title, FontStyle{})
 					title.Color = th.Pal.TextStrong
 					title.Font.Weight = font.SemiBold
 					return title.Layout(gtx)
 				}),
 				layout.Rigid(func(gtx layout.Context) layout.Dimensions {
-					hint := material.Caption(th.Mat, "j/k or ↑/↓ select · Enter open · Esc cancel")
+					hint := material.Caption(th.Mat, "j/k or ↑/↓ select · Enter open · h/q/Esc cancel")
+					th.applyFont(&hint, FontStyle{})
 					hint.Color = th.Pal.TextMuted
 					return layout.Inset{Top: unit.Dp(4), Bottom: unit.Dp(12)}.Layout(gtx, hint.Layout)
 				}),
@@ -136,6 +138,7 @@ func (l *LinkPicker) layoutRow(gtx layout.Context, th *Theme, idx int, r *linkRo
 				Right:  unit.Dp(12),
 			}.Layout(gtx, func(gtx layout.Context) layout.Dimensions {
 				lbl := material.Body2(th.Mat, fmt.Sprintf("%d. %s", idx+1, r.url))
+				th.applyFont(&lbl, FontStyle{})
 				lbl.Color = color
 				if active {
 					lbl.Font.Weight = font.SemiBold

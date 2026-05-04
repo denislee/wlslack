@@ -3,8 +3,10 @@ package slack
 import (
 	"errors"
 	"fmt"
+	"io"
 	"log/slog"
 	"net/http"
+	"os"
 	"sort"
 	"strings"
 	"sync"
@@ -156,6 +158,8 @@ type Client struct {
 	api    *slackapi.Client
 	cache  *Cache
 	selfID string
+	token  string
+	cookie string
 }
 
 func NewClient(token, cookie string) (*Client, error) {
@@ -168,8 +172,10 @@ func NewClient(token, cookie string) (*Client, error) {
 	}
 	api := slackapi.New(token, opts...)
 	c := &Client{
-		api:   api,
-		cache: NewCache(),
+		api:    api,
+		cache:  NewCache(),
+		token:  token,
+		cookie: cookie,
 	}
 	channelNameLookup = func(id string) (string, bool) {
 		if ch := c.cache.GetChannel(id); ch != nil && ch.Name != "" {
@@ -194,7 +200,7 @@ func (c *Client) AuthTest() (string, error) {
 // Returns a typed error so callers can format actionable advice.
 func (c *Client) VerifyFileAccess() error {
 	var errs []string
-	
+
 	// Probe files:read
 	_, _, err := c.api.ListFiles(slackapi.ListFilesParameters{Limit: 1})
 	if err != nil {
@@ -278,6 +284,9 @@ func (c *Client) GetChannels(types []string, priorityIDs []string) ([]Channel, e
 
 			// Pre-populate from cache so we have data for hideEmpty even if enrichment is skipped.
 			if cached := c.cache.GetChannel(ch.ID); cached != nil {
+				if (ch.IsMpIM || ch.IsIM) && cached.Name != "" && !strings.HasPrefix(cached.Name, "mpdm-") && !strings.HasPrefix(cached.Name, "U") {
+					cc.Name = cached.Name
+				}
 				cc.UnreadCount = cached.UnreadCount
 				cc.LatestTS = cached.LatestTS
 				cc.LastReadTS = cached.LastReadTS
@@ -328,34 +337,65 @@ func imDisplayName(u *User, fallbackID string) string {
 	return fallbackID
 }
 
-// ResolveIMNames fills in display names for IM channels in parallel, using the
-// per-user resolution cache. It mutates channels in place, then refreshes the
-// in-memory cache and on-disk snapshot. Safe to call from a goroutine after
-// GetChannels has returned.
-func (c *Client) ResolveIMNames(channels []Channel) {
+// ResolveConversationNames fills in display names for IM and MPIM channels in
+// parallel, using the per-user resolution cache. It mutates channels in place,
+// then refreshes the in-memory cache and on-disk snapshot. Safe to call from a
+// goroutine after GetChannels has returned.
+func (c *Client) ResolveConversationNames(channels []Channel) {
 	var wg sync.WaitGroup
 	sem := make(chan struct{}, 8)
 
 	for i := range channels {
-		if !channels[i].IsIM || channels[i].UserID == "" {
-			continue
-		}
-		if u := c.cache.GetUser(channels[i].UserID); u != nil {
-			channels[i].Name = imDisplayName(u, channels[i].UserID)
-			continue
-		}
-		wg.Add(1)
-		go func(idx int) {
-			defer wg.Done()
-			sem <- struct{}{}
-			defer func() { <-sem }()
-			user, err := c.ResolveUser(channels[idx].UserID)
-			if err != nil {
-				slog.Debug("ResolveIMNames: resolve failed", "user", channels[idx].UserID, "error", err)
-				return
+		if channels[i].IsIM && channels[i].UserID != "" {
+			if u := c.cache.GetUser(channels[i].UserID); u != nil {
+				channels[i].Name = imDisplayName(u, channels[i].UserID)
+				continue
 			}
-			channels[idx].Name = imDisplayName(user, channels[idx].UserID)
-		}(i)
+			wg.Add(1)
+			go func(idx int) {
+				defer wg.Done()
+				sem <- struct{}{}
+				defer func() { <-sem }()
+				user, err := c.ResolveUser(channels[idx].UserID)
+				if err != nil {
+					slog.Debug("ResolveConversationNames: resolve failed", "user", channels[idx].UserID, "error", err)
+					return
+				}
+				channels[idx].Name = imDisplayName(user, channels[idx].UserID)
+			}(i)
+		} else if channels[i].IsMPIM {
+			wg.Add(1)
+			go func(idx int) {
+				defer wg.Done()
+				sem <- struct{}{}
+				defer func() { <-sem }()
+
+				memberIDs, _, err := c.api.GetUsersInConversation(&slackapi.GetUsersInConversationParameters{
+					ChannelID: channels[idx].ID,
+				})
+				if err != nil {
+					slog.Debug("ResolveConversationNames: get members failed", "channel", channels[idx].ID, "error", err)
+					return
+				}
+
+				var names []string
+				for _, uid := range memberIDs {
+					if uid == c.selfID {
+						continue
+					}
+					user, err := c.ResolveUser(uid)
+					if err != nil {
+						names = append(names, uid)
+						continue
+					}
+					names = append(names, imDisplayName(user, uid))
+				}
+				sort.Strings(names)
+				if len(names) > 0 {
+					channels[idx].Name = strings.Join(names, ", ")
+				}
+			}(i)
+		}
 	}
 	wg.Wait()
 
@@ -377,7 +417,7 @@ func (c *Client) GetUnreadCounts(ids []string) ([]Channel, error) {
 	c.enrichWithUnreadCounts(channels, ids)
 
 	for _, ch := range channels {
-		c.cache.SetChannelUnread(ch.ID, ch.UnreadCount, ch.LastReadTS, ch.LatestTS)
+		c.cache.SetChannelUnread(ch.ID, ch.UnreadCount, 0, ch.LastReadTS, ch.LatestTS)
 	}
 
 	return channels, nil
@@ -412,13 +452,26 @@ func (c *Client) enrichWithUnreadCounts(channels []Channel, priorityIDs []string
 				ChannelID: channels[idx].ID,
 			})
 			if err != nil {
-				slog.Debug("conversations.info error", "channel", channels[idx].Name, "error", err)
+				if strings.Contains(err.Error(), "missing_scope") {
+					slog.Warn("conversations.info failed: missing scope (needs channels:read, groups:read, im:read, or mpim:read)", "channel", channels[idx].Name, "error", err)
+				} else {
+					slog.Debug("conversations.info error", "channel", channels[idx].Name, "error", err)
+				}
 				return
 			}
 			channels[idx].UnreadCount = info.UnreadCountDisplay
 			channels[idx].LastReadTS = info.LastRead
 			if info.Latest != nil {
 				channels[idx].LatestTS = info.Latest.Timestamp
+			}
+
+			// Fallback: if UnreadCountDisplay is 0 but LatestTS > LastReadTS,
+			// assume at least 1 unread. Bot tokens often get 0 for
+			// UnreadCountDisplay even when unreads exist.
+			if channels[idx].UnreadCount == 0 && channels[idx].LatestTS != "" && channels[idx].LastReadTS != "" {
+				if channels[idx].LatestTS > channels[idx].LastReadTS {
+					channels[idx].UnreadCount = 1
+				}
 			}
 
 			// If LatestTS is still empty after info check, do a surgical history probe
@@ -460,6 +513,54 @@ func (c *Client) GetMessages(channelID string, limit int, oldest string) ([]Mess
 
 	messages := make([]Message, 0, len(history.Messages))
 	for _, msg := range history.Messages {
+		messages = append(messages, c.convertMessage(msg))
+	}
+
+	for i, j := 0, len(messages)-1; i < j; i, j = i+1, j-1 {
+		messages[i], messages[j] = messages[j], messages[i]
+	}
+
+	c.cache.SetMessages(channelID, messages)
+	_ = c.cache.SaveMessagesToDisk(channelID, messages)
+	go c.ResolveMentions(messages)
+	return messages, nil
+}
+
+func (c *Client) GetMessagesContext(channelID string, limit int, ts string) ([]Message, error) {
+	half := limit / 2
+
+	paramsBefore := &slackapi.GetConversationHistoryParameters{
+		ChannelID: channelID,
+		Limit:     half,
+		Latest:    ts,
+		Inclusive: true,
+	}
+	historyBefore, err := c.api.GetConversationHistory(paramsBefore)
+	if err != nil {
+		return nil, fmt.Errorf("history before: %w", err)
+	}
+
+	paramsAfter := &slackapi.GetConversationHistoryParameters{
+		ChannelID: channelID,
+		Limit:     half,
+		Oldest:    ts,
+		Inclusive: false,
+	}
+	historyAfter, err := c.api.GetConversationHistory(paramsAfter)
+	if err != nil {
+		return nil, fmt.Errorf("history after: %w", err)
+	}
+
+	var all []slackapi.Message
+	if historyAfter != nil && len(historyAfter.Messages) > 0 {
+		all = append(all, historyAfter.Messages...)
+	}
+	if historyBefore != nil && len(historyBefore.Messages) > 0 {
+		all = append(all, historyBefore.Messages...)
+	}
+
+	messages := make([]Message, 0, len(all))
+	for _, msg := range all {
 		messages = append(messages, c.convertMessage(msg))
 	}
 
@@ -632,11 +733,56 @@ func (c *Client) MarkChannel(channelID, ts string) error {
 	return nil
 }
 
+func (c *Client) DownloadFile(url, destPath string) error {
+	req, err := http.NewRequest("GET", url, nil)
+	if err != nil {
+		return fmt.Errorf("build request: %w", err)
+	}
+	if strings.HasSuffix(req.URL.Host, ".slack.com") || req.URL.Host == "slack.com" {
+		req.Header.Set("Authorization", "Bearer "+c.token)
+	}
+
+	client := newSlackHTTPClient(c.cookie)
+	// Reuse redirect policy from ImageLoader logic if needed, but for direct
+	// downloads a simpler policy might suffice. Let's use the one from images.go
+	// to be safe as Slack 302s to CDNs.
+	client.CheckRedirect = func(req *http.Request, via []*http.Request) error {
+		if len(via) >= 10 {
+			return fmt.Errorf("too many redirects")
+		}
+		if len(via) > 0 {
+			if auth := via[0].Header.Get("Authorization"); auth != "" {
+				if strings.HasSuffix(req.URL.Host, ".slack.com") || req.URL.Host == "slack.com" {
+					req.Header.Set("Authorization", auth)
+				}
+			}
+		}
+		return nil
+	}
+
+	resp, err := client.Do(req)
+	if err != nil {
+		return fmt.Errorf("fetch: %w", err)
+	}
+	defer resp.Body.Close()
+
+	if resp.StatusCode != http.StatusOK {
+		return fmt.Errorf("status %d", resp.StatusCode)
+	}
+
+	out, err := os.Create(destPath)
+	if err != nil {
+		return fmt.Errorf("create file: %w", err)
+	}
+	defer out.Close()
+
+	_, err = io.Copy(out, resp.Body)
+	return err
+}
+
 func (c *Client) Search(query string) ([]SearchResult, error) {
 	params := slackapi.SearchParameters{
-		Sort:          "timestamp",
-		SortDirection: "desc",
-		Count:         20,
+		Count: 100,
 	}
 	msgs, err := c.api.SearchMessages(query, params)
 	if err != nil {
@@ -647,7 +793,10 @@ func (c *Client) Search(query string) ([]SearchResult, error) {
 	for _, match := range msgs.Matches {
 		channelName := match.Channel.Name
 		isIM := strings.HasPrefix(match.Channel.ID, "D")
-		if isIM && strings.HasPrefix(channelName, "U") {
+
+		if ch := c.cache.GetChannel(match.Channel.ID); ch != nil && ch.Name != "" {
+			channelName = ch.Name
+		} else if isIM && strings.HasPrefix(channelName, "U") {
 			if user, err := c.ResolveUser(channelName); err == nil {
 				channelName = user.DisplayName
 				if channelName == "" {
@@ -655,6 +804,7 @@ func (c *Client) Search(query string) ([]SearchResult, error) {
 				}
 			}
 		}
+
 		results = append(results, SearchResult{
 			ChannelID:   match.Channel.ID,
 			ChannelName: channelName,
@@ -893,8 +1043,26 @@ func (c *Client) convertMessage(msg slackapi.Message) Message {
 			files = append(files, File{
 				Name:     title,
 				URL:      ib.ImageURL,
-				Mimetype: "image/jpeg", // fallback so IsImage() works
+				Mimetype: detectMime(ib.ImageURL),
 			})
+		} else if sb, ok := b.(*slackapi.SectionBlock); ok && sb.Accessory != nil {
+			if img := sb.Accessory.ImageElement; img != nil && img.ImageURL != nil {
+				files = append(files, File{
+					Name:     img.AltText,
+					URL:      *img.ImageURL,
+					Mimetype: detectMime(*img.ImageURL),
+				})
+			}
+		} else if cb, ok := b.(*slackapi.ContextBlock); ok {
+			for _, el := range cb.ContextElements.Elements {
+				if img, ok := el.(*slackapi.ImageBlockElement); ok && img.ImageURL != nil {
+					files = append(files, File{
+						Name:     img.AltText,
+						URL:      *img.ImageURL,
+						Mimetype: detectMime(*img.ImageURL),
+					})
+				}
+			}
 		}
 	}
 
@@ -903,13 +1071,13 @@ func (c *Client) convertMessage(msg slackapi.Message) Message {
 			files = append(files, File{
 				Name:     a.Title,
 				URL:      a.ImageURL,
-				Mimetype: "image/jpeg",
+				Mimetype: detectMime(a.ImageURL),
 			})
 		} else if a.ThumbURL != "" {
 			files = append(files, File{
 				Name:     a.Title,
 				URL:      a.ThumbURL,
-				Mimetype: "image/jpeg",
+				Mimetype: detectMime(a.ThumbURL),
 			})
 		}
 	}
@@ -951,6 +1119,42 @@ func (c *Client) convertMessage(msg slackapi.Message) Message {
 			"raw_text", msg.Text)
 	}
 
+	// Detect raw GIF URLs in text and treat them as images if no other files exist.
+	if len(files) == 0 && text != "" {
+		urls := ExtractURLs(text)
+		if len(urls) == 1 {
+			u := urls[0]
+			low := strings.ToLower(u)
+			isGif := strings.HasSuffix(low, ".gif") ||
+				strings.Contains(low, ".gif?") ||
+				strings.Contains(low, "giphy.com/media/") ||
+				strings.Contains(low, "media.giphy.com/") ||
+				strings.Contains(low, "tenor.com/view/") ||
+				(strings.Contains(low, "giphy.com/gifs/") && !strings.Contains(low, "/html5"))
+
+			if isGif {
+				raw := strings.TrimSpace(text)
+				slog.Debug("GIF detection candidate", "url", u, "text", raw)
+
+				// Be lenient: check if the text is just the URL, or the URL wrapped in < >,
+				// or if the text is exactly what Slack's ExtractURLs produced.
+				cleanRaw := strings.Trim(raw, "<>")
+				if cleanRaw == u || strings.HasPrefix(raw, "<"+u+"|") {
+					files = append(files, File{
+						Name:     "gif",
+						URL:      u,
+						Mimetype: "image/gif",
+					})
+					slog.Debug("GIF detected and added to files")
+				} else {
+					slog.Debug("GIF candidate rejected due to text mismatch", "text", raw, "u", u)
+				}
+			}
+		} else if len(urls) > 0 {
+			slog.Debug("Multiple URLs found, skipping GIF detection", "count", len(urls))
+		}
+	}
+
 	return Message{
 		Timestamp:   msg.Timestamp,
 		UserID:      userID,
@@ -966,6 +1170,24 @@ func (c *Client) convertMessage(msg slackapi.Message) Message {
 		EditHistory: nil,
 		Files:       files,
 		IsBot:       msg.BotID != "" || msg.BotProfile != nil,
+	}
+}
+
+func detectMime(url string) string {
+	low := strings.ToLower(url)
+	switch {
+	case strings.HasSuffix(low, ".gif") || strings.Contains(low, ".gif?"):
+		return "image/gif"
+	case strings.Contains(low, "giphy.com/media/") || strings.Contains(low, "media.giphy.com/"):
+		return "image/gif"
+	case strings.Contains(low, "tenor.com/view/") || strings.Contains(low, "c.tenor.com/"):
+		return "image/gif"
+	case strings.HasSuffix(low, ".png") || strings.Contains(low, ".png?"):
+		return "image/png"
+	case strings.HasSuffix(low, ".webp") || strings.Contains(low, ".webp?"):
+		return "image/webp"
+	default:
+		return "image/jpeg"
 	}
 }
 

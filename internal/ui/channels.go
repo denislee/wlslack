@@ -298,6 +298,7 @@ func (s *ChannelsSidebar) rebuildRows() {
 	// types so the user can scan them in one place. A channel only ever lives
 	// in one group — being unread takes priority over its category.
 	var unread, favs, channels, externals, dms, mpdms []slack.Channel
+	hasAnyUnread := false
 	for _, ch := range s.raw {
 		isFav := s.favorites[ch.ID]
 		if s.hideEmpty && ch.LatestTSVerified && ch.LatestTS == "" && ch.UnreadCount == 0 && !isFav && !ch.IsIM && !ch.IsMPIM {
@@ -307,9 +308,17 @@ func (s *ChannelsSidebar) rebuildRows() {
 		if s.hideEmpty && !isFav && !ch.IsIM && !ch.IsMPIM {
 			slog.Debug("sidebar: keeping channel", "id", ch.ID, "name", ch.Name, "unread", ch.UnreadCount, "latest", ch.LatestTS, "verified", ch.LatestTSVerified)
 		}
+
+		if ch.MentionCount > 0 {
+			hasAnyMention := true
+			_ = hasAnyMention // suppress unused
+		}
+
+		if ch.MentionCount > 0 {
+			hasAnyUnread = true
+		}
+
 		switch {
-		case ch.UnreadCount > 0:
-			unread = append(unread, ch)
 		case isFav:
 			favs = append(favs, ch)
 		case ch.IsIM:
@@ -346,8 +355,11 @@ func (s *ChannelsSidebar) rebuildRows() {
 			return ci.Name < cj.Name
 		})
 	}
+
 	byActivity(favs)
-	byActivity(unread)
+	if hasAnyUnread {
+		unread = []slack.Channel{{ID: "__UNREADS__", Name: "All Unreads"}}
+	}
 	byActivity(channels)
 	byActivity(externals)
 	byActivity(dms)
@@ -490,8 +502,12 @@ func (s *ChannelsSidebar) layoutHeader(gtx layout.Context, th *Theme, r *sidebar
 				lbl.Color = textColor
 				lbl.Font.Weight = font.SemiBold
 				lbl.TextSize = unit.Sp(11)
-				if th.Fonts.Channels.Face != "" {
-					lbl.Font.Typeface = font.Typeface(th.Fonts.Channels.Face)
+				th.applyFont(&lbl, th.Fonts.Channels)
+				// Re-apply the smaller size if not explicitly overridden in Channels section
+				if th.Fonts.Channels.Size == 0 && th.Fonts.Global.Size == 0 {
+					lbl.TextSize = unit.Sp(11)
+				} else if th.Fonts.Channels.Size == 0 {
+					lbl.TextSize = unit.Sp(max(8, th.Fonts.Global.Size-2))
 				}
 				return lbl.Layout(gtx)
 			})
@@ -502,6 +518,16 @@ func (s *ChannelsSidebar) layoutHeader(gtx layout.Context, th *Theme, r *sidebar
 func (s *ChannelsSidebar) layoutRow(gtx layout.Context, th *Theme, fm *slack.Formatter, r *sidebarRow) layout.Dimensions {
 	active := r.channel.ID == s.activeID
 	hasUnread := r.channel.UnreadCount > 0
+	hasMention := r.channel.MentionCount > 0
+	if r.channel.IsIM || r.channel.IsMPIM {
+		if hasUnread {
+			hasMention = true
+		}
+	}
+	if r.channel.ID == "__UNREADS__" {
+		hasUnread = true
+		hasMention = true
+	}
 
 	bg := th.SidebarPal.BgSidebar
 	textColor := th.SidebarPal.Text
@@ -539,10 +565,10 @@ func (s *ChannelsSidebar) layoutRow(gtx layout.Context, th *Theme, fm *slack.For
 		drawAccentStripe := func(gtx layout.Context) layout.Dimensions {
 			if leftBorder.Left {
 				return withBorder(gtx, th.SidebarPal.Accent, leftBorder, func(gtx layout.Context) layout.Dimensions {
-					return s.layoutRowInner(gtx, th, r, prefix, name, presence, textColor, hasUnread, active, bg)
+					return s.layoutRowInner(gtx, th, r, prefix, name, presence, textColor, hasUnread, hasMention, active, bg)
 				})
 			}
-			return s.layoutRowInner(gtx, th, r, prefix, name, presence, textColor, hasUnread, active, bg)
+			return s.layoutRowInner(gtx, th, r, prefix, name, presence, textColor, hasUnread, hasMention, active, bg)
 		}
 		return drawAccentStripe(gtx)
 	})
@@ -554,7 +580,7 @@ func (s *ChannelsSidebar) layoutRowInner(
 	r *sidebarRow,
 	prefix, name, presence string,
 	textColor color.NRGBA,
-	hasUnread, active bool,
+	hasUnread, hasMention, active bool,
 	bg color.NRGBA,
 ) layout.Dimensions {
 	return paintedBg(gtx, bg, func(gtx layout.Context) layout.Dimensions {
@@ -568,6 +594,10 @@ func (s *ChannelsSidebar) layoutRowInner(
 				layout.Rigid(func(gtx layout.Context) layout.Dimensions {
 					lbl := material.Body1(th.Mat, prefix)
 					lbl.Color = th.SidebarPal.TextMuted
+					if hasUnread || active {
+						lbl.Color = textColor
+						lbl.Font.Weight = font.Bold
+					}
 					if presence == "active" {
 						lbl.Color = th.SidebarPal.PresenceActive
 					} else if presence == "away" {
@@ -588,14 +618,32 @@ func (s *ChannelsSidebar) layoutRowInner(
 					return lbl.Layout(gtx)
 				}),
 				layout.Rigid(func(gtx layout.Context) layout.Dimensions {
-					if !hasUnread {
+					// For DMs, we show everything as a mention (red), so hide the gray unread badge
+					if r.channel.ID == "__UNREADS__" || r.channel.UnreadCount <= 0 || r.channel.IsIM || r.channel.IsMPIM {
 						return layout.Dimensions{}
 					}
 					lbl := material.Caption(th.Mat, fmt.Sprintf("%d", r.channel.UnreadCount))
-					lbl.Color = th.SidebarPal.Unread
+					lbl.Color = th.SidebarPal.UnreadBadge
 					lbl.Font.Weight = font.SemiBold
 					th.applyFont(&lbl, th.Fonts.Channels)
 					return lbl.Layout(gtx)
+				}),
+				layout.Rigid(func(gtx layout.Context) layout.Dimensions {
+					count := r.channel.MentionCount
+					if r.channel.IsIM || r.channel.IsMPIM {
+						count = r.channel.UnreadCount
+					}
+
+					if r.channel.ID == "__UNREADS__" || count <= 0 {
+						return layout.Dimensions{}
+					}
+					return layout.Inset{Left: unit.Dp(4)}.Layout(gtx, func(gtx layout.Context) layout.Dimensions {
+						lbl := material.Caption(th.Mat, fmt.Sprintf("%d", count))
+						lbl.Color = th.SidebarPal.MentionBadge
+						lbl.Font.Weight = font.Bold
+						th.applyFont(&lbl, th.Fonts.Channels)
+						return lbl.Layout(gtx)
+					})
 				}),
 			)
 		})
@@ -607,7 +655,7 @@ func channelPrefix(ch slack.Channel) string {
 	case ch.IsIM:
 		return "@ "
 	case ch.IsMPIM:
-		return "@@ "
+		return ""
 	case ch.IsExternal:
 		return "🌐 "
 	case ch.IsPrivate:

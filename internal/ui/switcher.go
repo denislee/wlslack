@@ -1,15 +1,26 @@
 package ui
 
 import (
+	"image"
 	"strings"
+	"time"
 
 	"gioui.org/font"
 	"gioui.org/layout"
+	"gioui.org/op/clip"
+	"gioui.org/op/paint"
 	"gioui.org/unit"
 	"gioui.org/widget"
 	"gioui.org/widget/material"
 
 	"github.com/user/wlslack/internal/slack"
+)
+
+type switcherTab int
+
+const (
+	tabChannels switcherTab = iota
+	tabMessages
 )
 
 // QuickSwitcher is the Ctrl+K jump-to-channel overlay. It owns its own editor
@@ -19,19 +30,23 @@ type QuickSwitcher struct {
 	editor    widget.Editor
 	list      widget.List
 	all       []slack.Channel
+	results   []slack.SearchResult
 	rows      []*switcherRow
 	selected  int
 	lastQuery string
-	onSelect  func(channelID string)
+	tab       switcherTab
+	onSelect  func(channelID string, messageTS string)
+	onSearch  func(query string)
 }
 
 type switcherRow struct {
 	click   widget.Clickable
 	channel slack.Channel
+	result  slack.SearchResult
 }
 
-func newQuickSwitcher(onSelect func(string)) *QuickSwitcher {
-	qs := &QuickSwitcher{onSelect: onSelect}
+func newQuickSwitcher(onSelect func(string, string), onSearch func(string)) *QuickSwitcher {
+	qs := &QuickSwitcher{onSelect: onSelect, onSearch: onSearch}
 	qs.editor.SingleLine = true
 	qs.list.Axis = layout.Vertical
 	return qs
@@ -40,7 +55,17 @@ func newQuickSwitcher(onSelect func(string)) *QuickSwitcher {
 // SetChannels stores the unfiltered channel set used as the search corpus.
 func (q *QuickSwitcher) SetChannels(channels []slack.Channel) {
 	q.all = channels
-	q.refilter()
+	if q.tab == tabChannels {
+		q.refilter()
+	}
+}
+
+// SetResults stores the message search results.
+func (q *QuickSwitcher) SetResults(results []slack.SearchResult) {
+	q.results = results
+	if q.tab == tabMessages {
+		q.refilter()
+	}
 }
 
 // Reset clears the query and selection. Call when the switcher opens.
@@ -50,11 +75,25 @@ func (q *QuickSwitcher) Reset() {
 	q.selected = 0
 	q.list.Position.First = 0
 	q.list.Position.Offset = 0
+	q.tab = tabChannels
 	q.refilter()
 }
 
 // Editor exposes the input widget so the host can manage focus on it.
 func (q *QuickSwitcher) Editor() *widget.Editor { return &q.editor }
+
+// ToggleTab switches between Channels and Messages search.
+func (q *QuickSwitcher) ToggleTab() {
+	if q.tab == tabChannels {
+		q.tab = tabMessages
+	} else {
+		q.tab = tabChannels
+	}
+	q.selected = 0
+	q.list.Position.First = 0
+	q.list.Position.Offset = 0
+	q.refilter()
+}
 
 // DeleteLastWord deletes the last word in the editor, simulating Ctrl+W.
 func (q *QuickSwitcher) DeleteLastWord() {
@@ -148,17 +187,36 @@ func (q *QuickSwitcher) Submit() {
 		return
 	}
 	if q.onSelect != nil {
-		q.onSelect(q.rows[q.selected].channel.ID)
+		row := q.rows[q.selected]
+		if q.tab == tabChannels {
+			q.onSelect(row.channel.ID, "")
+		} else {
+			q.onSelect(row.result.ChannelID, row.result.Message.Timestamp)
+		}
 	}
 }
 
 func (q *QuickSwitcher) refilter() {
 	query := strings.TrimSpace(strings.ToLower(q.editor.Text()))
+	changed := query != q.lastQuery
 	q.lastQuery = query
+
+	if q.tab == tabMessages && changed && query != "" {
+		if q.onSearch != nil {
+			q.onSearch(query)
+		}
+	}
+
 	out := q.rows[:0]
-	for _, ch := range q.all {
-		if query == "" || strings.Contains(strings.ToLower(ch.Name), query) {
-			out = append(out, &switcherRow{channel: ch})
+	if q.tab == tabChannels {
+		for _, ch := range q.all {
+			if query == "" || strings.Contains(strings.ToLower(ch.Name), query) {
+				out = append(out, &switcherRow{channel: ch})
+			}
+		}
+	} else {
+		for _, res := range q.results {
+			out = append(out, &switcherRow{result: res})
 		}
 	}
 	q.rows = out
@@ -199,10 +257,26 @@ func (q *QuickSwitcher) Layout(gtx layout.Context, th *Theme) layout.Dimensions 
 		}.Layout(gtx, func(gtx layout.Context) layout.Dimensions {
 			return layout.Flex{Axis: layout.Vertical}.Layout(gtx,
 				layout.Rigid(func(gtx layout.Context) layout.Dimensions {
+					return layout.Flex{Axis: layout.Horizontal, Alignment: layout.Middle}.Layout(gtx,
+						layout.Rigid(func(gtx layout.Context) layout.Dimensions {
+							return q.layoutTab(gtx, th, "Channels", q.tab == tabChannels)
+						}),
+						layout.Rigid(layout.Spacer{Width: unit.Dp(12)}.Layout),
+						layout.Rigid(func(gtx layout.Context) layout.Dimensions {
+							return q.layoutTab(gtx, th, "Messages", q.tab == tabMessages)
+						}),
+					)
+				}),
+				layout.Rigid(layout.Spacer{Height: unit.Dp(12)}.Layout),
+				layout.Rigid(func(gtx layout.Context) layout.Dimensions {
 					return withBorder(gtx, th.Pal.BorderStrong, borders{Top: true, Right: true, Bottom: true, Left: true}, func(gtx layout.Context) layout.Dimensions {
 						return paintedBg(gtx, th.Pal.BgCode, func(gtx layout.Context) layout.Dimensions {
 							return layout.UniformInset(unit.Dp(10)).Layout(gtx, func(gtx layout.Context) layout.Dimensions {
-								ed := material.Editor(th.Mat, &q.editor, "Jump to channel or DM…")
+								hint := "Jump to channel or DM…"
+								if q.tab == tabMessages {
+									hint = "Search messages…"
+								}
+								ed := material.Editor(th.Mat, &q.editor, hint)
 								ed.Color = th.Pal.TextStrong
 								ed.HintColor = th.Pal.TextMuted
 								ed.SelectionColor = WithAlpha(th.Pal.Selection, 0x66)
@@ -214,6 +288,14 @@ func (q *QuickSwitcher) Layout(gtx layout.Context, th *Theme) layout.Dimensions 
 				}),
 				layout.Rigid(layout.Spacer{Height: unit.Dp(8)}.Layout),
 				layout.Flexed(1, func(gtx layout.Context) layout.Dimensions {
+					if len(q.rows) == 0 && q.tab == tabMessages && q.lastQuery != "" {
+						return layout.Center.Layout(gtx, func(gtx layout.Context) layout.Dimensions {
+							lbl := material.Body1(th.Mat, "No messages found.")
+							th.applyFont(&lbl, FontStyle{})
+							lbl.Color = th.Pal.TextDim
+							return lbl.Layout(gtx)
+						})
+					}
 					return material.List(th.Mat, &q.list).Layout(gtx, len(q.rows), func(gtx layout.Context, idx int) layout.Dimensions {
 						return q.layoutRow(gtx, th, idx, q.rows[idx])
 					})
@@ -221,6 +303,36 @@ func (q *QuickSwitcher) Layout(gtx layout.Context, th *Theme) layout.Dimensions 
 			)
 		})
 	})
+}
+
+func (q *QuickSwitcher) layoutTab(gtx layout.Context, th *Theme, label string, active bool) layout.Dimensions {
+	color := th.Pal.TextMuted
+	if active {
+		color = th.Pal.Accent
+	}
+	return layout.Stack{}.Layout(gtx,
+		layout.Stacked(func(gtx layout.Context) layout.Dimensions {
+			return layout.Inset{Bottom: unit.Dp(4)}.Layout(gtx, func(gtx layout.Context) layout.Dimensions {
+				lbl := material.Body2(th.Mat, label)
+				th.applyFont(&lbl, FontStyle{})
+				lbl.Color = color
+				if active {
+					lbl.Font.Weight = font.Bold
+				}
+				return lbl.Layout(gtx)
+			})
+		}),
+		layout.Stacked(func(gtx layout.Context) layout.Dimensions {
+			if !active {
+				return layout.Dimensions{}
+			}
+			return layout.Inset{Top: unit.Dp(20)}.Layout(gtx, func(gtx layout.Context) layout.Dimensions {
+				rect := image.Rect(0, 0, gtx.Constraints.Min.X, gtx.Dp(unit.Dp(2)))
+				paint.FillShape(gtx.Ops, color, clip.Rect(rect).Op())
+				return layout.Dimensions{Size: rect.Size()}
+			})
+		}),
+	)
 }
 
 func (q *QuickSwitcher) layoutRow(gtx layout.Context, th *Theme, idx int, r *switcherRow) layout.Dimensions {
@@ -239,17 +351,66 @@ func (q *QuickSwitcher) layoutRow(gtx layout.Context, th *Theme, idx int, r *swi
 				Left:   unit.Dp(12),
 				Right:  unit.Dp(12),
 			}.Layout(gtx, func(gtx layout.Context) layout.Dimensions {
-				name := r.channel.Name
-				if name == "" {
-					name = r.channel.ID
+				if q.tab == tabChannels {
+					name := r.channel.Name
+					if name == "" {
+						name = r.channel.ID
+					}
+					lbl := material.Body1(th.Mat, channelPrefix(r.channel)+name)
+					lbl.Color = color
+					if active {
+						lbl.Font.Weight = font.SemiBold
+					}
+					th.applyFont(&lbl, th.Fonts.Search)
+					return lbl.Layout(gtx)
+				} else {
+					// Message search result
+					return layout.Flex{Axis: layout.Vertical}.Layout(gtx,
+						layout.Rigid(func(gtx layout.Context) layout.Dimensions {
+							return layout.Flex{Axis: layout.Horizontal, Alignment: layout.Middle}.Layout(gtx,
+								layout.Rigid(func(gtx layout.Context) layout.Dimensions {
+									lbl := material.Body2(th.Mat, r.result.ChannelName)
+									th.applyFont(&lbl, FontStyle{})
+									lbl.Color = th.Pal.Accent
+									lbl.Font.Style = font.Italic
+									return lbl.Layout(gtx)
+								}),
+								layout.Rigid(layout.Spacer{Width: unit.Dp(8)}.Layout),
+								layout.Rigid(func(gtx layout.Context) layout.Dimensions {
+									lbl := material.Caption(th.Mat, r.result.Message.Username)
+									th.applyFont(&lbl, FontStyle{})
+									lbl.Color = th.Pal.TextStrong
+									lbl.Font.Weight = font.Bold
+									return lbl.Layout(gtx)
+								}),
+								layout.Rigid(layout.Spacer{Width: unit.Dp(8)}.Layout),
+								layout.Rigid(func(gtx layout.Context) layout.Dimensions {
+									var ageStr string
+									if t, ok := slack.ParseTimestamp(r.result.Message.Timestamp); ok {
+										ageStr = slack.FormatAge(time.Since(t))
+									}
+									lbl := material.Caption(th.Mat, ageStr)
+									th.applyFont(&lbl, FontStyle{})
+									lbl.Color = th.Pal.Text
+									return lbl.Layout(gtx)
+								}),
+							)
+						}),
+						layout.Rigid(layout.Spacer{Height: unit.Dp(2)}.Layout),
+						layout.Rigid(func(gtx layout.Context) layout.Dimensions {
+							// Clean up message text (Slack search returns some weird characters sometimes)
+							text := strings.ReplaceAll(r.result.Message.Text, "\n", " ")
+							if len(text) > 200 {
+								text = text[:197] + "..."
+							}
+							lbl := material.Body2(th.Mat, text)
+							lbl.Color = color
+							lbl.MaxLines = 1
+							th.applyFont(&lbl, th.Fonts.Search)
+							return lbl.Layout(gtx)
+						}),
+					)
 				}
-				lbl := material.Body1(th.Mat, channelPrefix(r.channel)+name)
-				lbl.Color = color
-				if active {
-					lbl.Font.Weight = font.SemiBold
-				}
-				th.applyFont(&lbl, th.Fonts.Search)
-				return lbl.Layout(gtx)
 			})
 		})
 	}

@@ -167,9 +167,11 @@ func (m *MentionPicker) Layout(gtx layout.Context, th *Theme) layout.Dimensions 
 								label = "@" + row.label + " (group)"
 							}
 							lbl := material.Body2(th.Mat, label)
+							th.applyFont(&lbl, FontStyle{})
 							lbl.Color = th.Pal.Text
 							if active {
 								lbl.Font.Weight = font.SemiBold
+								lbl.Color = th.Pal.TextStrong
 							}
 							return lbl.Layout(gtx)
 						})

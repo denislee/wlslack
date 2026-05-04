@@ -11,6 +11,7 @@ type UIState struct {
 	UnreadOnly             bool              `json:"unread_only"`
 	ShowOnlyRecentChannels bool              `json:"show_only_recent_channels"`
 	HideEmptyChannels      bool              `json:"hide_empty_channels"`
+	ShowStatusBar          bool              `json:"show_status_bar"`
 	Favorites              []string          `json:"favorites"`
 	CollapsedGroups        []string          `json:"collapsed_groups"`
 	ReadTimestamps         map[string]string `json:"read_timestamps"`
@@ -22,6 +23,7 @@ type UIState struct {
 // FontPrefs holds per-section typeface and size overrides. Zero values mean
 // "use the theme default" so the file stays human-editable.
 type FontPrefs struct {
+	Global   FontPref `json:"global"`
 	Channels FontPref `json:"channels"`
 	Header   FontPref `json:"header"`
 	Messages FontPref `json:"messages"`
@@ -30,6 +32,7 @@ type FontPrefs struct {
 	Code     FontPref `json:"code"`
 	Search   FontPref `json:"search"`
 	UserInfo FontPref `json:"user_info"`
+	StatusBar FontPref `json:"status_bar"`
 }
 
 type FontPref struct {
@@ -43,6 +46,7 @@ func DefaultUIState() UIState {
 		UnreadOnly:             true,
 		ShowOnlyRecentChannels: false,
 		HideEmptyChannels:      false,
+		ShowStatusBar:          true,
 		Favorites:              []string{},
 		CollapsedGroups: []string{},
 		ReadTimestamps:  make(map[string]string),
