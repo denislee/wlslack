@@ -1,6 +1,7 @@
 package ui
 
 import (
+	"context"
 	"io"
 	"log/slog"
 	"os"
@@ -20,6 +21,7 @@ import (
 
 	"github.com/user/wlslack/internal/config"
 	"github.com/user/wlslack/internal/slack"
+	"github.com/user/wlslack/internal/translate"
 )
 
 // focusPane identifies which pane vim-style nav targets.
@@ -226,7 +228,8 @@ func (a *App) layout(gtx layout.Context) layout.Dimensions {
 							placeholder = "Message #" + ch.Name
 						}
 					}
-					return a.composer.Layout(gtx, a.th, placeholder, a.onSend)
+					gtx.Constraints.Min.X = gtx.Constraints.Max.X
+					return a.composer.Layout(gtx, a.th, a.fmt, placeholder, a.onSend)
 				}),
 			)
 		}),
@@ -292,6 +295,12 @@ func (a *App) handleKeys(gtx layout.Context) {
 			key.Filter{Focus: switcherEditor, Name: key.NameReturn},
 			key.Filter{Focus: switcherEditor, Name: "N", Required: key.ModCtrl},
 			key.Filter{Focus: switcherEditor, Name: "P", Required: key.ModCtrl},
+			key.Filter{Focus: switcherEditor, Name: "W", Required: key.ModCtrl},
+			key.Filter{Focus: switcherEditor, Name: "A", Required: key.ModCtrl},
+			key.Filter{Focus: switcherEditor, Name: "E", Required: key.ModCtrl},
+			key.Filter{Focus: switcherEditor, Name: "F", Required: key.ModCtrl},
+			key.Filter{Focus: switcherEditor, Name: "B", Required: key.ModCtrl},
+			key.Filter{Focus: switcherEditor, Name: "C", Required: key.ModCtrl},
 		)
 	}
 	if a.reactionPickerOpen {
@@ -304,13 +313,35 @@ func (a *App) handleKeys(gtx layout.Context) {
 			key.Filter{Focus: reactionEditor, Name: "N", Required: key.ModCtrl},
 			key.Filter{Focus: reactionEditor, Name: "P", Required: key.ModCtrl},
 			key.Filter{Focus: reactionEditor, Name: "W", Required: key.ModCtrl},
+			key.Filter{Focus: reactionEditor, Name: "A", Required: key.ModCtrl},
+			key.Filter{Focus: reactionEditor, Name: "E", Required: key.ModCtrl},
+			key.Filter{Focus: reactionEditor, Name: "F", Required: key.ModCtrl},
+			key.Filter{Focus: reactionEditor, Name: "B", Required: key.ModCtrl},
+			key.Filter{Focus: reactionEditor, Name: "C", Required: key.ModCtrl},
 		)
 	}
 	if composerFocused {
 		filters = append(filters,
 			key.Filter{Focus: &a.composer.editor, Name: key.NameEscape},
 			key.Filter{Focus: &a.composer.editor, Name: "[", Required: key.ModCtrl},
+			key.Filter{Focus: &a.composer.editor, Name: "W", Required: key.ModCtrl},
+			key.Filter{Focus: &a.composer.editor, Name: "T", Required: key.ModCtrl},
+			key.Filter{Focus: &a.composer.editor, Name: "A", Required: key.ModCtrl},
+			key.Filter{Focus: &a.composer.editor, Name: "E", Required: key.ModCtrl},
+			key.Filter{Focus: &a.composer.editor, Name: "F", Required: key.ModCtrl},
+			key.Filter{Focus: &a.composer.editor, Name: "B", Required: key.ModCtrl},
+			key.Filter{Focus: &a.composer.editor, Name: "C", Required: key.ModCtrl},
 		)
+		if a.composer.mentionPicker.Active() {
+			filters = append(filters,
+				key.Filter{Focus: &a.composer.editor, Name: key.NameUpArrow},
+				key.Filter{Focus: &a.composer.editor, Name: key.NameDownArrow},
+				key.Filter{Focus: &a.composer.editor, Name: key.NameReturn},
+				key.Filter{Focus: &a.composer.editor, Name: key.NameTab},
+				key.Filter{Focus: &a.composer.editor, Name: "N", Required: key.ModCtrl},
+				key.Filter{Focus: &a.composer.editor, Name: "P", Required: key.ModCtrl},
+			)
+		}
 	}
 	if !composerFocused && !switcherFocused && !reactionFocused && !messageEditorFocused && !a.messageEditorOpen {
 		// No Focus on these filters: any non-text-editing focus state (e.g. a
@@ -452,6 +483,24 @@ func (a *App) handleKeys(gtx layout.Context) {
 		case a.switcherOpen && (kev.Name == key.NameDownArrow || (kev.Name == "N" && kev.Modifiers.Contain(key.ModCtrl))):
 			a.switcher.MoveSelection(1)
 			a.w.Invalidate()
+		case a.switcherOpen && kev.Name == "W" && kev.Modifiers.Contain(key.ModCtrl):
+			a.switcher.DeleteLastWord()
+			a.w.Invalidate()
+		case a.switcherOpen && kev.Name == "A" && kev.Modifiers.Contain(key.ModCtrl):
+			a.switcher.MoveToStart()
+			a.w.Invalidate()
+		case a.switcherOpen && kev.Name == "E" && kev.Modifiers.Contain(key.ModCtrl):
+			a.switcher.MoveToEnd()
+			a.w.Invalidate()
+		case a.switcherOpen && kev.Name == "F" && kev.Modifiers.Contain(key.ModCtrl):
+			a.switcher.MoveCursor(1)
+			a.w.Invalidate()
+		case a.switcherOpen && kev.Name == "B" && kev.Modifiers.Contain(key.ModCtrl):
+			a.switcher.MoveCursor(-1)
+			a.w.Invalidate()
+		case a.switcherOpen && kev.Name == "C" && kev.Modifiers.Contain(key.ModCtrl):
+			a.switcher.Clear()
+			a.w.Invalidate()
 		case a.switcherOpen && kev.Name == key.NameReturn:
 			a.switcher.Submit()
 		case a.reactionPickerOpen && (kev.Name == key.NameUpArrow || (kev.Name == "P" && kev.Modifiers.Contain(key.ModCtrl))):
@@ -462,6 +511,54 @@ func (a *App) handleKeys(gtx layout.Context) {
 			a.w.Invalidate()
 		case a.reactionPickerOpen && kev.Name == "W" && kev.Modifiers.Contain(key.ModCtrl):
 			a.reactionPicker.DeleteLastWord()
+			a.w.Invalidate()
+		case a.reactionPickerOpen && kev.Name == "A" && kev.Modifiers.Contain(key.ModCtrl):
+			a.reactionPicker.MoveToStart()
+			a.w.Invalidate()
+		case a.reactionPickerOpen && kev.Name == "E" && kev.Modifiers.Contain(key.ModCtrl):
+			a.reactionPicker.MoveToEnd()
+			a.w.Invalidate()
+		case a.reactionPickerOpen && kev.Name == "F" && kev.Modifiers.Contain(key.ModCtrl):
+			a.reactionPicker.MoveCursor(1)
+			a.w.Invalidate()
+		case a.reactionPickerOpen && kev.Name == "B" && kev.Modifiers.Contain(key.ModCtrl):
+			a.reactionPicker.MoveCursor(-1)
+			a.w.Invalidate()
+		case a.reactionPickerOpen && kev.Name == "C" && kev.Modifiers.Contain(key.ModCtrl):
+			a.reactionPicker.Clear()
+			a.w.Invalidate()
+		case composerFocused && kev.Name == "W" && kev.Modifiers.Contain(key.ModCtrl):
+			a.composer.DeleteLastWord()
+			a.w.Invalidate()
+		case composerFocused && kev.Name == "A" && kev.Modifiers.Contain(key.ModCtrl):
+			a.composer.MoveToStart()
+			a.w.Invalidate()
+		case composerFocused && kev.Name == "E" && kev.Modifiers.Contain(key.ModCtrl):
+			a.composer.MoveToEnd()
+			a.w.Invalidate()
+		case composerFocused && kev.Name == "T" && kev.Modifiers.Contain(key.ModCtrl):
+			a.composer.TranslateToEnglish(func(text string, done func(string, error)) {
+				go func() {
+					translated, err := translate.ToEnglish(context.Background(), text)
+					if err != nil {
+						slog.Error("translate failed", "error", err)
+						done("", err)
+						a.w.Invalidate()
+						return
+					}
+					done(translated, nil)
+					a.w.Invalidate()
+				}()
+			})
+			a.w.Invalidate()
+		case composerFocused && a.composer.mentionPicker.Active() && (kev.Name == key.NameUpArrow || (kev.Name == "P" && kev.Modifiers.Contain(key.ModCtrl))):
+			a.composer.mentionPicker.MoveSelection(-1)
+			a.w.Invalidate()
+		case composerFocused && a.composer.mentionPicker.Active() && (kev.Name == key.NameDownArrow || (kev.Name == "N" && kev.Modifiers.Contain(key.ModCtrl))):
+			a.composer.mentionPicker.MoveSelection(1)
+			a.w.Invalidate()
+		case composerFocused && a.composer.mentionPicker.Active() && (kev.Name == key.NameReturn || kev.Name == key.NameTab):
+			a.composer.mentionPicker.Submit()
 			a.w.Invalidate()
 		case a.reactionPickerOpen && kev.Name == key.NameReturn:
 			a.reactionPicker.Submit()
@@ -1058,12 +1155,21 @@ func (a *App) getActiveID() string {
 // configured interval. The first refresh happens immediately so the user
 // doesn't stare at an empty sidebar.
 func (a *App) pollChannels() {
-	// Try cached channels first for instant UI.
+	// Try cached data first for instant UI.
 	if cached, err := a.client.Cache().LoadChannelsFromDisk(); err == nil && len(cached) > 0 {
 		a.channels.SetChannels(cached)
 		a.autoSelectFirst(cached)
 		a.w.Invalidate()
 	}
+	_, _ = a.client.Cache().LoadUsersFromDisk()
+	_, _ = a.client.Cache().LoadUserGroupsFromDisk()
+	go func() {
+		if _, err := a.client.GetUserGroups(); err != nil {
+			slog.Warn("load usergroups failed", "error", err)
+			return
+		}
+		a.w.Invalidate()
+	}()
 
 	tick := func() {
 		channels, err := a.client.GetChannels(a.cfg.Channels.Types, a.cfg.Channels.Pinned)

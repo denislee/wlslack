@@ -35,6 +35,22 @@ func TestFormatSpans_Mentions(t *testing.T) {
 				{Text: ".", Style: 0},
 			},
 		},
+		{
+			input: "Hello <@S123|Marketing Group>!",
+			expected: []Span{
+				{Text: "Hello ", Style: 0},
+				{Text: "@Marketing Group", Style: StyleMention},
+				{Text: "!", Style: 0},
+			},
+		},
+		{
+			input: "Hello <@U123|user-name>!",
+			expected: []Span{
+				{Text: "Hello ", Style: 0},
+				{Text: "@user-name", Style: StyleMention},
+				{Text: "!", Style: 0},
+			},
+		},
 	}
 
 	for _, tt := range tests {

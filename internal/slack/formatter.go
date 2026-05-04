@@ -246,21 +246,30 @@ func (f *Formatter) GetUser(userID string) *User {
 	return f.cache.GetUser(userID)
 }
 
+func (f *Formatter) GetAllUsers() []User {
+	return f.cache.GetAllUsers()
+}
+
+func (f *Formatter) GetAllUserGroups() []UserGroup {
+	return f.cache.GetAllUserGroups()
+}
+
 var (
-	reUserMention    = regexp.MustCompile(`<@(U[A-Z0-9]+)>`)
+	reUserMention    = regexp.MustCompile(`<@([A-Z0-9]+)(\|[^>]+)?>`)
 	reChannelLink    = regexp.MustCompile(`<#(C[A-Z0-9]+)\|([^>]+)>`)
 	reURL            = regexp.MustCompile(`<(https?://[^|>]+)\|([^>]+)>`)
 	reURLNoLabel     = regexp.MustCompile(`<(https?://[^>]+)>`)
 	reEmojiShort     = regexp.MustCompile(`:([a-z0-9_+-]+):`)
-	reSubteamLabel   = regexp.MustCompile(`<!subteam\^(S[A-Z0-9]+)\|@([^>]+)>`)
-	reSubteamNoLabel = regexp.MustCompile(`<!subteam\^(S[A-Z0-9]+)>`)
+	reSubteamLabel   = regexp.MustCompile(`<!subteam\^([A-Z0-9]+)\|@?([^>]+)>`)
+	reSubteamNoLabel = regexp.MustCompile(`<!subteam\^([A-Z0-9]+)>`)
+	reTeamMention    = regexp.MustCompile(`<!team\^([A-Z0-9]+)>`)
 	reSpecialMention = regexp.MustCompile(`<!(here|channel|everyone)(\|[^>]*)?>`)
 	reCodeBlock      = regexp.MustCompile("(?s)```(.+?)```")
 	reInlineCode     = regexp.MustCompile("`([^`]+)`")
 	reBareURL        = regexp.MustCompile(`https?://[^\s<>]+`)
 	reEnvironments   = regexp.MustCompile(`(?i)\b(staging|production)\b`)
 	reAlertStatus    = regexp.MustCompile(`\b(RESOLVED|FIRING)\b`)
-	reBlankLines     = regexp.MustCompile(`\n[ \t]*(\n[ \t]*)+`)
+	reBlankLines     = regexp.MustCompile(`([ \t]*\r?\n[ \t]*){2,}`)
 )
 
 // collapseBlankLines reduces any run of two or more newlines (with optional
@@ -268,38 +277,73 @@ var (
 func collapseBlankLines(text string) string {
 	return reBlankLines.ReplaceAllString(text, "\n")
 }
-
 func (f *Formatter) resolveUserMentions(text string) string {
 	return reUserMention.ReplaceAllStringFunc(text, func(match string) string {
 		parts := reUserMention.FindStringSubmatch(match)
 		if len(parts) < 2 {
 			return match
 		}
-		userID := parts[1]
-		if user := f.cache.GetUser(userID); user != nil {
-			name := user.DisplayName
-			if name == "" {
-				name = user.Name
-			}
-			return fmt.Sprintf("@%s", name)
+		id := parts[1]
+		label := ""
+		if len(parts) > 2 && parts[2] != "" {
+			label = strings.TrimPrefix(parts[2], "|")
 		}
-		return fmt.Sprintf("@%s", userID)
+
+		if strings.HasPrefix(id, "S") {
+			if f.cache != nil {
+				if group := f.cache.GetUserGroup(id); group != nil {
+					return "@" + group.Handle
+				}
+			}
+			if label != "" {
+				return "@" + label
+			}
+			return "@" + id
+		}
+		if f.cache != nil {
+			if user := f.cache.GetUser(id); user != nil {
+				name := user.DisplayName
+				if name == "" {
+					name = user.Name
+				}
+				return fmt.Sprintf("@%s", name)
+			}
+		}
+		if label != "" {
+			return "@" + label
+		}
+		return fmt.Sprintf("@%s", id)
 	})
 }
-
 func (f *Formatter) resolveGroupMentions(text string) string {
-	text = reSubteamLabel.ReplaceAllString(text, "@$2")
+	text = reSubteamLabel.ReplaceAllStringFunc(text, func(match string) string {
+		parts := reSubteamLabel.FindStringSubmatch(match)
+		if len(parts) < 3 {
+			return match
+		}
+		groupID := parts[1]
+		label := parts[2]
+		if f.cache != nil && (label == groupID || strings.HasPrefix(label, "S")) {
+			if group := f.cache.GetUserGroup(groupID); group != nil {
+				return "@" + group.Handle
+			}
+		}
+		return "@" + label
+	})
 	text = reSubteamNoLabel.ReplaceAllStringFunc(text, func(match string) string {
 		parts := reSubteamNoLabel.FindStringSubmatch(match)
 		if len(parts) < 2 {
 			return match
 		}
 		groupID := parts[1]
-		if group := f.cache.GetUserGroup(groupID); group != nil {
-			return "@" + group.Handle
+		if f.cache != nil {
+			if group := f.cache.GetUserGroup(groupID); group != nil {
+				return "@" + group.Handle
+			}
 		}
 		return "@" + groupID
 	})
+	text = reTeamMention.ReplaceAllString(text, "@team")
 	return text
 }
 
@@ -425,10 +469,18 @@ func (f *Formatter) appendInline(out *[]Span, text string) {
 		}
 		if m := reUserMention.FindStringSubmatchIndex(text[pos:]); m != nil {
 			s, e := pos+m[0], pos+m[1]
-			userID := text[pos+m[2] : pos+m[3]]
-			label := "@" + userID
+			id := text[pos+m[2] : pos+m[3]]
+			label := "@" + id
+			if m[4] != -1 && m[5] != -1 {
+				label = "@" + text[pos+m[4]+1 : pos+m[5]]
+			}
+
 			if f.cache != nil {
-				if user := f.cache.GetUser(userID); user != nil {
+				if strings.HasPrefix(id, "S") {
+					if group := f.cache.GetUserGroup(id); group != nil {
+						label = "@" + group.Handle
+					}
+				} else if user := f.cache.GetUser(id); user != nil {
 					name := user.DisplayName
 					if name == "" {
 						name = user.Name
@@ -438,10 +490,20 @@ func (f *Formatter) appendInline(out *[]Span, text string) {
 			}
 			try(cand{s, e, func() { emit(label, StyleMention, "") }})
 		}
+		if m := reTeamMention.FindStringSubmatchIndex(text[pos:]); m != nil {
+			s, e := pos+m[0], pos+m[1]
+			try(cand{s, e, func() { emit("@team", StyleMention, "") }})
+		}
 		if m := reSubteamLabel.FindStringSubmatchIndex(text[pos:]); m != nil {
 			s, e := pos+m[0], pos+m[1]
-			label := "@" + text[pos+m[4]:pos+m[5]]
-			try(cand{s, e, func() { emit(label, StyleMention, "") }})
+			groupID := text[pos+m[2] : pos+m[3]]
+			label := text[pos+m[4] : pos+m[5]]
+			if f.cache != nil && (label == groupID || strings.HasPrefix(label, "S")) {
+				if group := f.cache.GetUserGroup(groupID); group != nil {
+					label = group.Handle
+				}
+			}
+			try(cand{s, e, func() { emit("@"+label, StyleMention, "") }})
 		}
 		if m := reSubteamNoLabel.FindStringSubmatchIndex(text[pos:]); m != nil {
 			s, e := pos+m[0], pos+m[1]

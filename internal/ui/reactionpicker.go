@@ -3,7 +3,6 @@ package ui
 import (
 	"image"
 	"strings"
-	"unicode/utf8"
 
 	"gioui.org/f32"
 	"gioui.org/font"
@@ -87,21 +86,60 @@ func (r *ReactionPicker) Editor() *widget.Editor { return &r.editor }
 
 // DeleteLastWord deletes the last word in the editor, simulating Ctrl+W.
 func (r *ReactionPicker) DeleteLastWord() {
-	text := r.editor.Text()
-	if text == "" {
+	_, end := r.editor.Selection()
+	if end == 0 {
 		return
 	}
-	trimmed := strings.TrimRight(text, " \t")
-	idx := strings.LastIndexAny(trimmed, " \t")
-	var newText string
-	if idx == -1 {
-		newText = ""
-	} else {
-		newText = text[:idx+1]
+
+	runes := []rune(r.editor.Text())
+	if end > len(runes) {
+		end = len(runes)
 	}
-	r.editor.SetText(newText)
-	l := utf8.RuneCountInString(newText)
-	r.editor.SetCaret(l, l)
+
+	isSep := func(ru rune) bool {
+		return ru == ' ' || ru == '\t'
+	}
+
+	pos := end
+	// Skip trailing whitespace
+	for pos > 0 && isSep(runes[pos-1]) {
+		pos--
+	}
+	// Skip the word
+	for pos > 0 && !isSep(runes[pos-1]) {
+		pos--
+	}
+
+	if pos != end {
+		r.editor.SetCaret(pos, end)
+		r.editor.Insert("")
+	}
+}
+
+func (r *ReactionPicker) MoveToStart() {
+	r.editor.SetCaret(0, 0)
+}
+
+func (r *ReactionPicker) MoveToEnd() {
+	n := len([]rune(r.editor.Text()))
+	r.editor.SetCaret(n, n)
+}
+
+func (r *ReactionPicker) MoveCursor(delta int) {
+	_, end := r.editor.Selection()
+	n := len([]rune(r.editor.Text()))
+	newPos := end + delta
+	if newPos < 0 {
+		newPos = 0
+	}
+	if newPos > n {
+		newPos = n
+	}
+	r.editor.SetCaret(newPos, newPos)
+}
+
+func (r *ReactionPicker) Clear() {
+	r.editor.SetText("")
 }
 
 // MoveSelection shifts the highlighted row, scrolling to keep it in view.

@@ -18,7 +18,10 @@ var (
 
 // MarkdownToMrkdwn converts standard Markdown to Slack's mrkdwn format.
 func MarkdownToMrkdwn(text string) string {
-	// 0. Protect code blocks and inline code
+	// 0. Collapse double line breaks
+	text = collapseBlankLines(text)
+
+	// 1. Protect code blocks and inline code
 	var codeBlocks []string
 	text = reMdCodeBlock.ReplaceAllStringFunc(text, func(m string) string {
 		codeBlocks = append(codeBlocks, m)

@@ -88,6 +88,46 @@ func (c *Cache) SaveChannelsToDisk(channels []Channel) error {
 	return c.store.saveChannels(channels)
 }
 
+func (c *Cache) LoadUsersFromDisk() ([]User, error) {
+	if c.store == nil {
+		return nil, nil
+	}
+	users, err := c.store.loadAllUsers()
+	if err != nil {
+		return nil, err
+	}
+	for i := range users {
+		c.SetUser(&users[i])
+	}
+	return users, nil
+}
+
+func (c *Cache) SaveUsersToDisk(users []User) error {
+	if c.store == nil {
+		return nil
+	}
+	return c.store.saveUsers(users)
+}
+
+func (c *Cache) LoadUserGroupsFromDisk() ([]UserGroup, error) {
+	if c.store == nil {
+		return nil, nil
+	}
+	groups, err := c.store.loadAllUserGroups()
+	if err != nil {
+		return nil, err
+	}
+	c.SetUserGroups(groups)
+	return groups, nil
+}
+
+func (c *Cache) SaveUserGroupsToDisk(groups []UserGroup) error {
+	if c.store == nil {
+		return nil
+	}
+	return c.store.saveUserGroups(groups)
+}
+
 // LoadMessagesFromDisk pulls a channel's recent (within retention) messages
 // from SQLite into memory and returns them. Used to surface cached history
 // instantly when the user opens a channel that hasn't been fetched this run.
@@ -145,8 +185,14 @@ func (c *Cache) GetUser(id string) *User {
 
 func (c *Cache) SetUser(user *User) {
 	c.mu.Lock()
-	defer c.mu.Unlock()
 	c.users[user.ID] = user
+	c.mu.Unlock()
+
+	if c.store != nil {
+		if err := c.store.saveUsers([]User{*user}); err != nil {
+			slog.Debug("persist user failed", "user", user.ID, "error", err)
+		}
+	}
 }
 
 func (c *Cache) SetChannels(channels []Channel) {
@@ -279,10 +325,36 @@ func (c *Cache) GetThread(channelID, threadTS string) []Message {
 
 func (c *Cache) SetUserGroups(groups []UserGroup) {
 	c.mu.Lock()
-	defer c.mu.Unlock()
 	for i := range groups {
 		c.usergroups[groups[i].ID] = &groups[i]
 	}
+	c.mu.Unlock()
+
+	if c.store != nil {
+		if err := c.store.saveUserGroups(groups); err != nil {
+			slog.Debug("persist usergroups failed", "error", err)
+		}
+	}
+}
+
+func (c *Cache) GetAllUsers() []User {
+	c.mu.RLock()
+	defer c.mu.RUnlock()
+	out := make([]User, 0, len(c.users))
+	for _, u := range c.users {
+		out = append(out, *u)
+	}
+	return out
+}
+
+func (c *Cache) GetAllUserGroups() []UserGroup {
+	c.mu.RLock()
+	defer c.mu.RUnlock()
+	out := make([]UserGroup, 0, len(c.usergroups))
+	for _, g := range c.usergroups {
+		out = append(out, *g)
+	}
+	return out
 }
 
 func (c *Cache) GetUserGroup(id string) *UserGroup {

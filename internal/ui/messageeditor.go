@@ -184,6 +184,8 @@ func (e *MessageEditor) KeyFilters() []event.Filter {
 		key.Filter{Focus: t, Name: key.NameDownArrow},
 		key.Filter{Focus: t, Name: key.NameHome},
 		key.Filter{Focus: t, Name: key.NameEnd},
+		key.Filter{Focus: t, Name: "A", Required: key.ModCtrl},
+		key.Filter{Focus: t, Name: "E", Required: key.ModCtrl},
 	}
 }
 
@@ -238,9 +240,23 @@ func (e *MessageEditor) HandleKey(gtx layout.Context, ev key.Event) bool {
 	case "0", key.NameHome:
 		e.moveLineBoundary(-1)
 		e.gPending = false
+	case "A":
+		if ev.Modifiers.Contain(key.ModCtrl) {
+			e.moveLineBoundary(-1)
+			e.gPending = false
+		} else {
+			return false
+		}
 	case "$", key.NameEnd:
 		e.moveLineBoundary(1)
 		e.gPending = false
+	case "E":
+		if ev.Modifiers.Contain(key.ModCtrl) {
+			e.moveLineBoundary(1)
+			e.gPending = false
+		} else {
+			return false
+		}
 	case "G":
 		if ev.Modifiers.Contain(key.ModShift) {
 			e.moveCaret(e.editor.Len())

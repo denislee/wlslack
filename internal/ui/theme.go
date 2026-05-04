@@ -25,6 +25,7 @@ type Palette struct {
 	BgComposer  color.NRGBA
 	BgCode      color.NRGBA
 	BgRowAlt    color.NRGBA // subtle hover/active row tint, no animation
+	BgRowSelected color.NRGBA // stronger selection tint for pickers
 	Text        color.NRGBA
 	TextStrong  color.NRGBA
 	TextDim     color.NRGBA
@@ -53,6 +54,7 @@ type Palette struct {
 		BgComposer:   rgb(0x0f1115),
 		BgCode:       rgb(0x191c22),
 		BgRowAlt:     rgb(0x16191f),
+		BgRowSelected: rgb(0x262b33),
 		Text:         rgb(0xd7dae0),
 		TextStrong:   rgb(0xeef0f3),
 		TextDim:      rgb(0x8a93a0),
@@ -82,6 +84,7 @@ type Palette struct {
 		BgComposer:   rgb(0xffffff),
 		BgCode:       rgb(0xf4f5f7),
 		BgRowAlt:     rgb(0xeef0f3),
+		BgRowSelected: rgb(0xd7dae0),
 		Text:         rgb(0x191c22),
 		TextStrong:   rgb(0x0b0c10),
 		TextDim:      rgb(0x5e6571),
@@ -179,14 +182,16 @@ func newTheme() *Theme {
 	monoDefault := FontStyle{Face: monoFace, Size: 13}
 
 	return &Theme{
-		Mat:        mat,
-		Pal:        pal,
-		SidebarPal: pal,
-		BoldF:      font.Font{Weight: font.Bold},
-		ItalicF:   font.Font{Style: font.Italic},
-		MonoF:     font.Font{Typeface: font.Typeface(monoFace)},
-		Faces:     faces,
-		MonoFaces: monoFaces,
+		Mat:          mat,
+		Pal:          pal,
+		SidebarPal:   pal,
+		ThemeSidebar: "dark",
+		ThemeMain:    "dark",
+		BoldF:        font.Font{Weight: font.Bold},
+		ItalicF:      font.Font{Style: font.Italic},
+		MonoF:        font.Font{Typeface: font.Typeface(monoFace)},
+		Faces:        faces,
+		MonoFaces:    monoFaces,
 		Fonts: SectionFonts{
 			Channels: uiDefault,
 			Header:   uiDefault,
@@ -254,13 +259,20 @@ func (t *Theme) ApplyFontPrefs(p sectionPrefs) {
 }
 
 func (t *Theme) ApplyThemePrefs(sidebarTheme, mainTheme string) {
-	if sidebarTheme == "light" {
+	if sidebarTheme != "" {
+		t.ThemeSidebar = sidebarTheme
+	}
+	if mainTheme != "" {
+		t.ThemeMain = mainTheme
+	}
+
+	if t.ThemeSidebar == "light" {
 		t.SidebarPal = lightPalette()
 	} else {
 		t.SidebarPal = darkPalette()
 	}
 
-	if mainTheme == "light" {
+	if t.ThemeMain == "light" {
 		t.Pal = lightPalette()
 	} else {
 		t.Pal = darkPalette()

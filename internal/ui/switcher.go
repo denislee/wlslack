@@ -56,6 +56,64 @@ func (q *QuickSwitcher) Reset() {
 // Editor exposes the input widget so the host can manage focus on it.
 func (q *QuickSwitcher) Editor() *widget.Editor { return &q.editor }
 
+// DeleteLastWord deletes the last word in the editor, simulating Ctrl+W.
+func (q *QuickSwitcher) DeleteLastWord() {
+	_, end := q.editor.Selection()
+	if end == 0 {
+		return
+	}
+
+	runes := []rune(q.editor.Text())
+	if end > len(runes) {
+		end = len(runes)
+	}
+
+	isSep := func(ru rune) bool {
+		return ru == ' ' || ru == '\t'
+	}
+
+	pos := end
+	// Skip trailing whitespace
+	for pos > 0 && isSep(runes[pos-1]) {
+		pos--
+	}
+	// Skip the word
+	for pos > 0 && !isSep(runes[pos-1]) {
+		pos--
+	}
+
+	if pos != end {
+		q.editor.SetCaret(pos, end)
+		q.editor.Insert("")
+	}
+}
+
+func (q *QuickSwitcher) MoveToStart() {
+	q.editor.SetCaret(0, 0)
+}
+
+func (q *QuickSwitcher) MoveToEnd() {
+	n := len([]rune(q.editor.Text()))
+	q.editor.SetCaret(n, n)
+}
+
+func (q *QuickSwitcher) MoveCursor(delta int) {
+	_, end := q.editor.Selection()
+	n := len([]rune(q.editor.Text()))
+	newPos := end + delta
+	if newPos < 0 {
+		newPos = 0
+	}
+	if newPos > n {
+		newPos = n
+	}
+	q.editor.SetCaret(newPos, newPos)
+}
+
+func (q *QuickSwitcher) Clear() {
+	q.editor.SetText("")
+}
+
 // MoveSelection shifts the highlighted row, scrolling to keep it in view.
 func (q *QuickSwitcher) MoveSelection(delta int) {
 	if len(q.rows) == 0 {

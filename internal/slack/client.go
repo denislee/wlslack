@@ -193,18 +193,34 @@ func (c *Client) AuthTest() (string, error) {
 // CDN auth handshake" — both look identical in the image-loader logs.
 // Returns a typed error so callers can format actionable advice.
 func (c *Client) VerifyFileAccess() error {
+	var errs []string
+	
+	// Probe files:read
 	_, _, err := c.api.ListFiles(slackapi.ListFilesParameters{Limit: 1})
-	if err == nil {
-		return nil
+	if err != nil {
+		var serr slackapi.SlackErrorResponse
+		if (errors.As(err, &serr) && serr.Err == "missing_scope") || strings.Contains(err.Error(), "missing_scope") {
+			errs = append(errs, "token lacks files:read scope: regenerate the token with files:read (and files:write if you want uploads)")
+		} else {
+			slog.Debug("files.list probe failed", "error", err)
+		}
 	}
-	var serr slackapi.SlackErrorResponse
-	if errors.As(err, &serr) && serr.Err == "missing_scope" {
-		return fmt.Errorf("token lacks files:read scope: regenerate the token with files:read (and files:write if you want uploads)")
+
+	// Probe usergroups:read
+	_, err = c.api.GetUserGroups()
+	if err != nil {
+		var serr slackapi.SlackErrorResponse
+		if (errors.As(err, &serr) && serr.Err == "missing_scope") || strings.Contains(err.Error(), "missing_scope") {
+			errs = append(errs, "token lacks usergroups:read scope: group mentions will show as IDs instead of names")
+		} else {
+			slog.Debug("usergroups.list probe failed", "error", err)
+		}
 	}
-	if strings.Contains(err.Error(), "missing_scope") {
-		return fmt.Errorf("token lacks files:read scope: regenerate the token with files:read (and files:write if you want uploads)")
+
+	if len(errs) > 0 {
+		return errors.New(strings.Join(errs, "\n"))
 	}
-	return fmt.Errorf("files.list probe failed: %w", err)
+	return nil
 }
 
 func (c *Client) SetSelfID(id string) {
@@ -453,6 +469,7 @@ func (c *Client) GetMessages(channelID string, limit int, oldest string) ([]Mess
 
 	c.cache.SetMessages(channelID, messages)
 	_ = c.cache.SaveMessagesToDisk(channelID, messages)
+	go c.ResolveMentions(messages)
 	return messages, nil
 }
 
@@ -472,7 +489,72 @@ func (c *Client) GetThreadReplies(channelID, threadTS string) ([]Message, error)
 
 	c.cache.SetThread(channelID, threadTS, replies)
 	_ = c.cache.SaveThreadMessagesToDisk(channelID, threadTS, replies)
+	go c.ResolveMentions(replies)
 	return replies, nil
+}
+
+// ResolveMentions scans messages for user and group IDs that aren't in the
+// cache and resolves them in the background.
+func (c *Client) ResolveMentions(messages []Message) {
+	userIDs := make(map[string]bool)
+	groupIDs := make(map[string]bool)
+
+	for _, msg := range messages {
+		for _, m := range reUserMention.FindAllStringSubmatch(msg.Text, -1) {
+			id := m[1]
+			if strings.HasPrefix(id, "S") {
+				groupIDs[id] = true
+			} else {
+				userIDs[id] = true
+			}
+		}
+		for _, m := range reSubteamNoLabel.FindAllStringSubmatch(msg.Text, -1) {
+			groupIDs[m[1]] = true
+		}
+		for _, m := range reSubteamLabel.FindAllStringSubmatch(msg.Text, -1) {
+			groupIDs[m[1]] = true
+		}
+		for _, r := range msg.Reactions {
+			for _, u := range r.Users {
+				userIDs[u] = true
+			}
+		}
+		for _, u := range msg.ReplyUsers {
+			userIDs[u] = true
+		}
+	}
+
+	var wg sync.WaitGroup
+	sem := make(chan struct{}, 5)
+	for id := range userIDs {
+		if id == "" || c.cache.GetUser(id) != nil {
+			continue
+		}
+		wg.Add(1)
+		go func(userID string) {
+			defer wg.Done()
+			sem <- struct{}{}
+			defer func() { <-sem }()
+			_, _ = c.ResolveUser(userID)
+		}(id)
+	}
+
+	if len(groupIDs) > 0 {
+		needGroups := false
+		for id := range groupIDs {
+			if c.cache.GetUserGroup(id) == nil {
+				needGroups = true
+				break
+			}
+		}
+		if needGroups {
+			if _, err := c.GetUserGroups(); err != nil {
+				slog.Warn("resolve usergroups failed", "error", err)
+			}
+		}
+	}
+
+	wg.Wait()
 }
 
 func (c *Client) SendMessage(channelID, text string) error {
@@ -690,7 +772,7 @@ func (c *Client) ResolveBot(botID string) (*User, error) {
 }
 
 func (c *Client) GetUserGroups() ([]UserGroup, error) {
-	groups, err := c.api.GetUserGroups()
+	groups, err := c.api.GetUserGroups(slackapi.GetUserGroupsOptionIncludeDisabled(true))
 	if err != nil {
 		return nil, fmt.Errorf("get usergroups: %w", err)
 	}
@@ -704,6 +786,7 @@ func (c *Client) GetUserGroups() ([]UserGroup, error) {
 		})
 	}
 	c.cache.SetUserGroups(result)
+	slog.Debug("loaded usergroups", "count", len(result))
 	return result, nil
 }
 
@@ -847,7 +930,7 @@ func (c *Client) convertMessage(msg slackapi.Message) Message {
 	attText := c.extractAttachmentText(msg.Attachments)
 	if attText != "" {
 		if text != "" {
-			text += "\n\n" + attText
+			text += "\n" + attText
 		} else {
 			text = attText
 		}
@@ -926,15 +1009,15 @@ func richTextBlockToMarkdown(blk *slackapi.RichTextBlock) string {
 	for _, el := range blk.Elements {
 		switch e := el.(type) {
 		case *slackapi.RichTextSection:
-			parts = append(parts, richTextSectionToMarkdown(e.Elements))
+			parts = append(parts, strings.TrimSpace(richTextSectionToMarkdown(e.Elements)))
 		case *slackapi.RichTextQuote:
-			lines := strings.Split(richTextSectionToMarkdown(e.Elements), "\n")
+			lines := strings.Split(strings.TrimSpace(richTextSectionToMarkdown(e.Elements)), "\n")
 			for i, ln := range lines {
 				lines[i] = "> " + ln
 			}
 			parts = append(parts, strings.Join(lines, "\n"))
 		case *slackapi.RichTextPreformatted:
-			parts = append(parts, "```\n"+richTextSectionToMarkdown(e.Elements)+"\n```")
+			parts = append(parts, "```\n"+strings.TrimSpace(richTextSectionToMarkdown(e.Elements))+"\n```")
 		case *slackapi.RichTextList:
 			for i, item := range e.Elements {
 				if section, ok := item.(*slackapi.RichTextSection); ok {
@@ -942,7 +1025,7 @@ func richTextBlockToMarkdown(blk *slackapi.RichTextBlock) string {
 					if e.Style == slackapi.RTEListOrdered {
 						prefix = fmt.Sprintf("%d. ", i+1)
 					}
-					parts = append(parts, prefix+richTextSectionToMarkdown(section.Elements))
+					parts = append(parts, prefix+strings.TrimSpace(richTextSectionToMarkdown(section.Elements)))
 				}
 			}
 		}
@@ -1056,5 +1139,5 @@ func (c *Client) extractAttachmentText(attachments []slackapi.Attachment) string
 			parts = append(parts, strings.Join(lines, "\n"))
 		}
 	}
-	return strings.Join(parts, "\n\n")
+	return strings.Join(parts, "\n")
 }

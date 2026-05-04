@@ -22,6 +22,8 @@ func TestMarkdownToMrkdwn(t *testing.T) {
 		{"[link](http://a?b&c)", "<http://a?b&amp;c|link>"},
 		{"`*not italic*`", "`*not italic*`"},
 		{"```\n**not bold**\n```", "```\n**not bold**\n```"},
+		{"Line 1\n\nLine 2", "Line 1\nLine 2"},
+		{"Line 1\n \n \nLine 2", "Line 1\nLine 2"},
 	}
 
 	for _, tt := range tests {

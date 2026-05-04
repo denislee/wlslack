@@ -74,6 +74,28 @@ func initSchema(db *sql.DB) error {
 		)`,
 		`CREATE INDEX IF NOT EXISTS idx_messages_channel_ts ON messages(channel_id, thread_ts, ts_unix)`,
 		`CREATE INDEX IF NOT EXISTS idx_messages_ts_unix ON messages(ts_unix)`,
+		`CREATE TABLE IF NOT EXISTS users (
+			id TEXT PRIMARY KEY,
+			name TEXT NOT NULL,
+			real_name TEXT,
+			display_name TEXT,
+			is_bot INTEGER NOT NULL DEFAULT 0,
+			presence TEXT,
+			status_emoji TEXT,
+			status_text TEXT,
+			title TEXT,
+			email TEXT,
+			phone TEXT,
+			timezone TEXT,
+			image_url TEXT,
+			updated_at INTEGER NOT NULL
+		)`,
+		`CREATE TABLE IF NOT EXISTS usergroups (
+			id TEXT PRIMARY KEY,
+			handle TEXT NOT NULL,
+			name TEXT NOT NULL,
+			updated_at INTEGER NOT NULL
+		)`,
 	}
 	for _, s := range stmts {
 		if _, err := db.Exec(s); err != nil {
@@ -87,6 +109,9 @@ func initSchema(db *sql.DB) error {
 		`ALTER TABLE channels ADD COLUMN is_external INTEGER NOT NULL DEFAULT 0`,
 		`ALTER TABLE messages ADD COLUMN reply_users TEXT`,
 		`ALTER TABLE messages ADD COLUMN last_reply_ts TEXT`,
+		`ALTER TABLE users ADD COLUMN presence TEXT`,
+		`ALTER TABLE users ADD COLUMN status_emoji TEXT`,
+		`ALTER TABLE users ADD COLUMN status_text TEXT`,
 	}
 	for _, m := range migrations {
 		if _, err := db.Exec(m); err != nil && !strings.Contains(err.Error(), "duplicate column") {
@@ -101,6 +126,127 @@ func (s *sqliteStore) close() error {
 		return nil
 	}
 	return s.db.Close()
+}
+
+func (s *sqliteStore) loadAllUsers() ([]User, error) {
+	rows, err := s.db.Query(`
+		SELECT id, name, real_name, display_name, is_bot, presence,
+		       status_emoji, status_text, title, email, phone, timezone, image_url
+		FROM users`)
+	if err != nil {
+		return nil, fmt.Errorf("load users: %w", err)
+	}
+	defer rows.Close()
+
+	var out []User
+	for rows.Next() {
+		var u User
+		var realName, displayName, presence, emoji, text, title, email, phone, tz, image sql.NullString
+		var isBot int
+		if err := rows.Scan(&u.ID, &u.Name, &realName, &displayName, &isBot, &presence,
+			&emoji, &text, &title, &email, &phone, &tz, &image); err != nil {
+			return nil, err
+		}
+		u.RealName = realName.String
+		u.DisplayName = displayName.String
+		u.IsBot = isBot != 0
+		u.Presence = presence.String
+		u.StatusEmoji = emoji.String
+		u.StatusText = text.String
+		u.Title = title.String
+		u.Email = email.String
+		u.Phone = phone.String
+		u.Timezone = tz.String
+		u.ImageURL = image.String
+		out = append(out, u)
+	}
+	return out, rows.Err()
+}
+
+func (s *sqliteStore) saveUsers(users []User) error {
+	tx, err := s.db.Begin()
+	if err != nil {
+		return err
+	}
+	defer tx.Rollback()
+
+	stmt, err := tx.Prepare(`
+		INSERT INTO users (id, name, real_name, display_name, is_bot, presence,
+		                  status_emoji, status_text, title, email, phone, timezone, image_url, updated_at)
+		VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+		ON CONFLICT(id) DO UPDATE SET
+			name=excluded.name,
+			real_name=excluded.real_name,
+			display_name=excluded.display_name,
+			is_bot=excluded.is_bot,
+			presence=excluded.presence,
+			status_emoji=excluded.status_emoji,
+			status_text=excluded.status_text,
+			title=excluded.title,
+			email=excluded.email,
+			phone=excluded.phone,
+			timezone=excluded.timezone,
+			image_url=excluded.image_url,
+			updated_at=excluded.updated_at`)
+	if err != nil {
+		return err
+	}
+	defer stmt.Close()
+
+	now := time.Now().Unix()
+	for _, u := range users {
+		if _, err := stmt.Exec(u.ID, u.Name, u.RealName, u.DisplayName, boolToInt(u.IsBot),
+			u.Presence, u.StatusEmoji, u.StatusText, u.Title, u.Email, u.Phone, u.Timezone, u.ImageURL, now); err != nil {
+			return err
+		}
+	}
+	return tx.Commit()
+}
+
+func (s *sqliteStore) loadAllUserGroups() ([]UserGroup, error) {
+	rows, err := s.db.Query(`SELECT id, handle, name FROM usergroups`)
+	if err != nil {
+		return nil, fmt.Errorf("load usergroups: %w", err)
+	}
+	defer rows.Close()
+
+	var out []UserGroup
+	for rows.Next() {
+		var g UserGroup
+		if err := rows.Scan(&g.ID, &g.Handle, &g.Name); err != nil {
+			return nil, err
+		}
+		out = append(out, g)
+	}
+	return out, rows.Err()
+}
+
+func (s *sqliteStore) saveUserGroups(groups []UserGroup) error {
+	tx, err := s.db.Begin()
+	if err != nil {
+		return err
+	}
+	defer tx.Rollback()
+
+	stmt, err := tx.Prepare(`
+		INSERT INTO usergroups (id, handle, name, updated_at)
+		VALUES (?, ?, ?, ?)
+		ON CONFLICT(id) DO UPDATE SET
+			handle=excluded.handle,
+			name=excluded.name,
+			updated_at=excluded.updated_at`)
+	if err != nil {
+		return err
+	}
+	defer stmt.Close()
+
+	now := time.Now().Unix()
+	for _, g := range groups {
+		if _, err := stmt.Exec(g.ID, g.Handle, g.Name, now); err != nil {
+			return err
+		}
+	}
+	return tx.Commit()
 }
 
 // loadAllChannels reads every persisted channel row. Used at startup to
