@@ -154,6 +154,18 @@ func (m *MessagesView) PageSize() int {
 	return 1
 }
 
+func (m *MessagesView) CurrentMessages() []slack.Message {
+	rows := m.rows
+	if m.threadActive {
+		rows = m.threadRows
+	}
+	msgs := make([]slack.Message, len(rows))
+	for i, r := range rows {
+		msgs[i] = r.msg
+	}
+	return msgs
+}
+
 // HasSelection reports whether the channel-history list (not the thread list)
 // has a highlighted row that 'l' can drill into.
 func (m *MessagesView) HasSelection() bool {

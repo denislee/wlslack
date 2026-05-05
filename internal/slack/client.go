@@ -697,6 +697,7 @@ func (c *Client) SendThreadReply(channelID, threadTS, text string) error {
 		channelID,
 		slackapi.MsgOptionText(text, false),
 		slackapi.MsgOptionTS(threadTS),
+		slackapi.MsgOptionDisableLinkUnfurl(),
 	)
 	if err != nil {
 		return fmt.Errorf("send reply: %w", friendlyError(err))
@@ -824,15 +825,12 @@ const (
 	SlackbotID = "USLACKBOT"
 )
 
-func (c *Client) ResolveUser(userID string) (*User, error) {
+func (c *Client) RefreshUser(userID string) (*User, error) {
 	if userID == "" {
 		return nil, errors.New("empty user ID")
 	}
 	if strings.HasPrefix(userID, "B") {
 		return c.ResolveBot(userID)
-	}
-	if user := c.cache.GetUser(userID); user != nil {
-		return user, nil
 	}
 
 	info, err := c.api.GetUserInfo(userID)
@@ -869,7 +867,6 @@ func (c *Client) ResolveUser(userID string) (*User, error) {
 	}
 
 	if info.ID == SlackbotID && user.ImageURL == "" {
-		// Slackbot's profile often has a dedicated image if not in Image192
 		if info.Profile.Image72 != "" {
 			user.ImageURL = info.Profile.Image72
 		} else if info.Profile.Image48 != "" {
@@ -890,6 +887,19 @@ func (c *Client) ResolveUser(userID string) (*User, error) {
 
 	c.cache.SetUser(user)
 	return user, nil
+}
+
+func (c *Client) ResolveUser(userID string) (*User, error) {
+	if userID == "" {
+		return nil, errors.New("empty user ID")
+	}
+	if strings.HasPrefix(userID, "B") {
+		return c.ResolveBot(userID)
+	}
+	if user := c.cache.GetUser(userID); user != nil {
+		return user, nil
+	}
+	return c.RefreshUser(userID)
 }
 
 func (c *Client) ResolveBot(botID string) (*User, error) {

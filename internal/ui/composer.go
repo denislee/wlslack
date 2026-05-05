@@ -218,7 +218,7 @@ func (c *Composer) Clear() {
 //
 // The done callback is safe to call from any goroutine; the result is
 // applied to the editor inside Layout on the UI goroutine.
-func (c *Composer) TranslateToEnglish(onTranslate func(text string, done func(translated string, err error))) {
+func (c *Composer) TranslateToEnglish(onTranslate func(text string, setFeedback func(string), done func(translated string, err error))) {
 	if c.origText != "" {
 		c.editor.SetText(c.origText)
 		c.origText = ""
@@ -229,7 +229,9 @@ func (c *Composer) TranslateToEnglish(onTranslate func(text string, done func(tr
 		return
 	}
 	c.origText = text
-	onTranslate(text, func(translated string, err error) {
+	onTranslate(text, func(feedback string) {
+		c.editor.SetText(feedback)
+	}, func(translated string, err error) {
 		if err != nil {
 			c.pendingMu.Lock()
 			c.pendingSet = false

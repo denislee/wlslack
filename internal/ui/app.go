@@ -24,6 +24,7 @@ import (
 	"gioui.org/widget/material"
 
 	"github.com/user/wlslack/internal/config"
+	"github.com/user/wlslack/internal/llm"
 	"github.com/user/wlslack/internal/slack"
 	"github.com/user/wlslack/internal/translate"
 )
@@ -144,8 +145,66 @@ func Run(client *slack.Client, cfg *config.Config) error {
 	go a.pollChannels()
 	go a.pollActiveChannel()
 	go a.pollEmojis()
+	go a.pollPresence()
 
 	return a.loop()
+}
+
+func (a *App) pollPresence() {
+	t := time.NewTicker(a.cfg.Polling.Presence)
+	defer t.Stop()
+	for range t.C {
+		// Identify users to refresh.
+		userIDs := make(map[string]bool)
+
+		// 1. Users in DMs in the sidebar
+		for _, ch := range a.client.Cache().GetAllChannels() {
+			if ch.IsIM && ch.UserID != "" {
+				userIDs[ch.UserID] = true
+			}
+		}
+
+		// 2. Users in the current message view
+		msgs := a.messages.CurrentMessages()
+		for _, m := range msgs {
+			if m.UserID != "" && !m.IsBot {
+				userIDs[m.UserID] = true
+			}
+		}
+
+		if len(userIDs) == 0 {
+			continue
+		}
+
+		// Refresh them in the background with a slight stagger to avoid burst limits
+		go func(ids []string) {
+			sem := make(chan struct{}, 5)
+			for _, id := range ids {
+				sem <- struct{}{}
+				go func(userID string) {
+					defer func() { <-sem }()
+					_, err := a.client.RefreshUser(userID)
+					if err != nil {
+						slog.Debug("RefreshUser failed", "user", userID, "error", err)
+					}
+				}(id)
+				time.Sleep(100 * time.Millisecond)
+			}
+			// Wait for all in this batch to finish before invalidating
+			for i := 0; i < 5; i++ {
+				sem <- struct{}{}
+			}
+			a.w.Invalidate()
+		}(mapKeys(userIDs))
+	}
+}
+
+func mapKeys(m map[string]bool) []string {
+	keys := make([]string, 0, len(m))
+	for k := range m {
+		keys = append(keys, k)
+	}
+	return keys
 }
 
 func (a *App) pollEmojis() {
@@ -644,7 +703,27 @@ func (a *App) handleKeys(gtx layout.Context) {
 			a.composer.MoveToEnd()
 			a.w.Invalidate()
 		case composerFocused && kev.Name == "T" && kev.Modifiers.Contain(key.ModCtrl):
-			a.composer.TranslateToEnglish(func(text string, done func(string, error)) {
+			a.composer.TranslateToEnglish(func(text string, setFeedback func(string), done func(string, error)) {
+				urls := llm.ExtractURLs(text)
+				if len(urls) == 1 {
+					setFeedback("Summarizing link...")
+					go func() {
+						a.startTask("llm", "Summarizing link")
+						defer a.endTask("llm")
+						summarized, err := llm.SummarizeLink(context.Background(), text, urls[0])
+						if err != nil {
+							slog.Error("llm summarize failed", "error", err)
+							done("", err)
+							a.w.Invalidate()
+							return
+						}
+						done(summarized, nil)
+						a.w.Invalidate()
+					}()
+					return
+				}
+
+				setFeedback("Translating...")
 				go func() {
 					a.startTask("translate", "Translating")
 					defer a.endTask("translate")
@@ -1281,7 +1360,7 @@ func (a *App) onChannelSelectWithContext(id string, ts string) {
 			// Optimistically clear the unread count in cache
 			a.client.Cache().SetChannelUnread(ch.ID, 0, 0, ch.LatestTS, ch.LatestTS)
 			a.channels.SetChannels(a.client.Cache().GetAllChannels())
-			
+
 			go func(channelID, latestTS string) {
 				if err := a.client.MarkChannel(channelID, latestTS); err != nil {
 					slog.Debug("MarkChannel failed", "channel", channelID, "error", err)
