@@ -9,6 +9,7 @@ import (
 	"gioui.org/op/clip"
 	"gioui.org/op/paint"
 	"gioui.org/unit"
+	"gioui.org/widget"
 )
 
 // paintedBg fills the area occupied by w with bg, then renders w on top.
@@ -77,4 +78,114 @@ func withBorder(gtx layout.Context, c color.NRGBA, b borders, w layout.Widget) l
 func WithAlpha(c color.NRGBA, a uint8) color.NRGBA {
 	c.A = a
 	return c
+}
+
+// MoveWord jumps the editor caret to the start of the next (dir > 0) or
+// previous (dir < 0) word.
+func MoveWord(ed *widget.Editor, dir int) {
+	runes := []rune(ed.Text())
+	_, current := ed.Selection()
+	if current > len(runes) {
+		current = len(runes)
+	}
+
+	isSep := func(r rune) bool {
+		return r == ' ' || r == '\n' || r == '\t'
+	}
+
+	if dir > 0 {
+		foundSpace := false
+		for i := current; i < len(runes); i++ {
+			if isSep(runes[i]) {
+				foundSpace = true
+			} else if foundSpace {
+				ed.SetCaret(i, i)
+				return
+			}
+		}
+		ed.SetCaret(len(runes), len(runes))
+	} else {
+		foundNonSpace := false
+		for i := current - 1; i >= 0; i-- {
+			if !isSep(runes[i]) {
+				foundNonSpace = true
+			} else if foundNonSpace {
+				ed.SetCaret(i+1, i+1)
+				return
+			}
+		}
+		ed.SetCaret(0, 0)
+	}
+}
+
+// MoveLine jumps the editor caret one line up (dir < 0) or down (dir > 0).
+// It moves to the beginning of the target line. If already on the first/last
+// line, it moves to the beginning/end of the text.
+func MoveLine(ed *widget.Editor, dir int) {
+	runes := []rune(ed.Text())
+	_, current := ed.Selection()
+	if current > len(runes) {
+		current = len(runes)
+	}
+
+	// Calculate current column (rune offset from start of hard line)
+	col := 0
+	lineStart := 0
+	for i := current - 1; i >= 0; i-- {
+		if runes[i] == '\n' {
+			lineStart = i + 1
+			break
+		}
+		col++
+	}
+
+	if dir < 0 {
+		if lineStart == 0 {
+			return // Already on first hard line
+		}
+		// Find start of previous hard line
+		prevLineStart := 0
+		for i := lineStart - 2; i >= 0; i-- {
+			if runes[i] == '\n' {
+				prevLineStart = i + 1
+				break
+			}
+		}
+		// Previous line end (the \n character itself)
+		prevLineEnd := lineStart - 1
+
+		target := prevLineStart + col
+		if target > prevLineEnd {
+			target = prevLineEnd
+		}
+		ed.SetCaret(target, target)
+	} else {
+		// Find end of current hard line
+		lineEnd := len(runes)
+		for i := current; i < len(runes); i++ {
+			if runes[i] == '\n' {
+				lineEnd = i
+				break
+			}
+		}
+		if lineEnd == len(runes) {
+			return // Already on last hard line
+		}
+
+		nextLineStart := lineEnd + 1
+		// Find end of next hard line
+		nextLineEnd := len(runes)
+		for i := nextLineStart; i < len(runes); i++ {
+			if runes[i] == '\n' {
+				nextLineEnd = i
+				break
+			}
+		}
+
+		target := nextLineStart + col
+		if target > nextLineEnd {
+			target = nextLineEnd
+		}
+		ed.SetCaret(target, target)
+	}
 }

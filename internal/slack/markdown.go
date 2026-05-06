@@ -14,6 +14,7 @@ var (
 	reMdItalic     = regexp.MustCompile(`(?U)\*(.+)\*`)
 	reMdStrike     = regexp.MustCompile(`(?U)~~(.+)~~`)
 	reMdList       = regexp.MustCompile(`(?m)^([ \t]*)[*+-][ \t]+`)
+	reSlackTag     = regexp.MustCompile(`(?i)<(?:@[UW][A-Z0-9]+|#[CDG][A-Z0-9]+|!subteam\^[A-Z0-9]+|!team\^[A-Z0-9]+|!channel|!here|!everyone)(?:\|[^>]+)?>`)
 )
 
 // MarkdownToMrkdwn converts standard Markdown to Slack's mrkdwn format.
@@ -31,6 +32,13 @@ func MarkdownToMrkdwn(text string) string {
 	text = reMdInlineCode.ReplaceAllStringFunc(text, func(m string) string {
 		inlineCode = append(inlineCode, m)
 		return "\x03"
+	})
+
+	// 1.5 Protect Slack tags (mentions, channels, special mentions)
+	var slackTags []string
+	text = reSlackTag.ReplaceAllStringFunc(text, func(m string) string {
+		slackTags = append(slackTags, m)
+		return "\x04"
 	})
 
 	// 1. Escape Slack special characters: &, <, >
@@ -57,7 +65,10 @@ func MarkdownToMrkdwn(text string) string {
 	// 7. Convert temporary bold markers to Slack's *
 	text = strings.ReplaceAll(text, "\x01", "*")
 
-	// 8. Restore code blocks and inline code (they must be restored in order)
+	// 8. Restore protected elements (must be in order)
+	for _, t := range slackTags {
+		text = strings.Replace(text, "\x04", t, 1)
+	}
 	for _, c := range inlineCode {
 		text = strings.Replace(text, "\x03", c, 1)
 	}

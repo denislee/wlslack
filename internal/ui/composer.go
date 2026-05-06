@@ -20,6 +20,12 @@ type Composer struct {
 	editor        widget.Editor
 	mentionPicker *MentionPicker
 
+	// history stores sent messages. historyIdx is the current position in
+	// history. -1 means we are at the end (the current draft).
+	history      []string
+	historyIdx   int
+	currentDraft string
+
 	// origText is set on the first Ctrl+T press so a second press can swap
 	// the translated text back to what the user typed. Empty means no
 	// translation is currently active.
@@ -33,6 +39,7 @@ type Composer struct {
 func newComposer() *Composer {
 	c := &Composer{
 		mentionPicker: newMentionPicker(),
+		historyIdx:    -1,
 	}
 	c.editor.SingleLine = false
 	c.editor.Submit = true
@@ -59,9 +66,12 @@ func (c *Composer) Layout(gtx layout.Context, th *Theme, fm *slack.Formatter, pl
 			text := strings.TrimSpace(c.editor.Text())
 			if text != "" {
 				onSend(text)
+				c.history = append(c.history, text)
 			}
 			c.editor.SetText("")
 			c.origText = ""
+			c.historyIdx = -1
+			c.currentDraft = ""
 			c.mentionPicker.Close()
 		}
 	}
@@ -128,6 +138,8 @@ func (c *Composer) updateMentions(fm *slack.Formatter) {
 						mention := "<@" + id + ">"
 						if isGroup {
 							mention = "<!subteam^" + id + ">"
+						} else if id == "here" || id == "channel" || id == "everyone" {
+							mention = "<!" + id + ">"
 						}
 						c.editor.SetText(prefix + mention + " " + suffix)
 						newPos := len([]rune(prefix + mention + " "))
@@ -187,6 +199,11 @@ func (c *Composer) MoveToStart() {
 	c.editor.SetCaret(0, 0)
 }
 
+func (c *Composer) SelectAll() {
+	n := len([]rune(c.editor.Text()))
+	c.editor.SetCaret(0, n)
+}
+
 func (c *Composer) MoveToEnd() {
 	n := len([]rune(c.editor.Text()))
 	c.editor.SetCaret(n, n)
@@ -205,9 +222,48 @@ func (c *Composer) MoveCursor(delta int) {
 	c.editor.SetCaret(newPos, newPos)
 }
 
+func (c *Composer) MoveWord(dir int) {
+	MoveWord(&c.editor, dir)
+}
+
+func (c *Composer) MoveLine(dir int) {
+	MoveLine(&c.editor, dir)
+}
+
 func (c *Composer) Clear() {
 	c.editor.SetText("")
 	c.origText = ""
+}
+
+func (c *Composer) HistoryPrev() {
+	if len(c.history) == 0 {
+		return
+	}
+	if c.historyIdx == -1 {
+		c.currentDraft = c.editor.Text()
+		c.historyIdx = len(c.history) - 1
+	} else if c.historyIdx > 0 {
+		c.historyIdx--
+	} else {
+		return
+	}
+	c.editor.SetText(c.history[c.historyIdx])
+	c.MoveToEnd()
+}
+
+func (c *Composer) HistoryNext() {
+	if c.historyIdx == -1 {
+		return
+	}
+	if c.historyIdx < len(c.history)-1 {
+		c.historyIdx++
+		c.editor.SetText(c.history[c.historyIdx])
+	} else {
+		c.historyIdx = -1
+		c.editor.SetText("") // User specifically requested blank
+		c.currentDraft = ""
+	}
+	c.MoveToEnd()
 }
 
 // TranslateToEnglish toggles between the user's text and an English

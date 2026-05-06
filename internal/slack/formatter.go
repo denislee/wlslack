@@ -6,12 +6,14 @@ import (
 	"sort"
 	"strconv"
 	"strings"
+	"sync"
 	"time"
 
 	"github.com/kyokomi/emoji/v2"
 )
 
 type Formatter struct {
+	mu       sync.RWMutex
 	cache    *Cache
 	emojiMap map[string]string
 	tsFormat string
@@ -26,6 +28,8 @@ func NewFormatter(cache *Cache, tsFormat string) *Formatter {
 }
 
 func (f *Formatter) SetCustomEmojis(emojis map[string]string) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
 	for name, val := range emojis {
 		// handle aliases
 		for strings.HasPrefix(val, "alias:") {
@@ -44,6 +48,8 @@ func (f *Formatter) SetCustomEmojis(emojis map[string]string) {
 }
 
 func (f *Formatter) IsCustomEmoji(name string) bool {
+	f.mu.RLock()
+	defer f.mu.RUnlock()
 	val, ok := f.emojiMap[name]
 	if !ok {
 		return false
@@ -214,6 +220,8 @@ type EmojiEntry struct {
 // their rendered glyph, sorted by name. The reaction picker uses this as the
 // search corpus.
 func (f *Formatter) EmojiCatalog() []EmojiEntry {
+	f.mu.RLock()
+	defer f.mu.RUnlock()
 	out := make([]EmojiEntry, 0, len(f.emojiMap))
 	for name, glyph := range f.emojiMap {
 		out = append(out, EmojiEntry{Name: name, Glyph: glyph})
@@ -224,7 +232,10 @@ func (f *Formatter) EmojiCatalog() []EmojiEntry {
 
 func (f *Formatter) FormatEmoji(name string) string {
 	base, _, _ := strings.Cut(name, "::")
-	if emoji, ok := f.emojiMap[base]; ok {
+	f.mu.RLock()
+	emoji, ok := f.emojiMap[base]
+	f.mu.RUnlock()
+	if ok {
 		return emoji
 	}
 	return ":" + name + ":"

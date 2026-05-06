@@ -6,6 +6,7 @@ import (
 	"log/slog"
 	"sort"
 	"strings"
+	"sync"
 
 	"gioui.org/font"
 	"gioui.org/layout"
@@ -18,6 +19,8 @@ import (
 
 // ChannelsSidebar renders the left-hand list of channels.
 type ChannelsSidebar struct {
+	mu       sync.Mutex
+	dirty    bool
 	list     widget.List
 	rows     []*sidebarRow
 	activeID string
@@ -80,6 +83,8 @@ func newChannelsSidebar(onSelect func(id string)) *ChannelsSidebar {
 // follows the active channel so that subsequent j/k keeps stepping from
 // where the user is looking.
 func (s *ChannelsSidebar) SetActive(id string) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
 	s.activeID = id
 	s.cursorKey = id
 }
@@ -92,10 +97,12 @@ func (s *ChannelsSidebar) SetFavorites(ids []string, onChanged func([]string)) {
 	for _, id := range ids {
 		set[id] = true
 	}
+	s.mu.Lock()
+	defer s.mu.Unlock()
 	s.favorites = set
 	s.onFavoritesChanged = onChanged
 	if s.raw != nil {
-		s.rebuildRows()
+		s.dirty = true
 	}
 }
 
@@ -107,14 +114,22 @@ func (s *ChannelsSidebar) SetCollapsedGroups(keys []string, onChanged func([]str
 	for _, k := range keys {
 		set[k] = true
 	}
+	s.mu.Lock()
+	defer s.mu.Unlock()
 	s.collapsed = set
 	s.onCollapsedChanged = onChanged
 	if s.raw != nil {
-		s.rebuildRows()
+		s.dirty = true
 	}
 }
 
 func (s *ChannelsSidebar) collapsedSlice() []string {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	return s.collapsedSliceLocked()
+}
+
+func (s *ChannelsSidebar) collapsedSliceLocked() []string {
 	out := make([]string, 0, len(s.collapsed))
 	for k, v := range s.collapsed {
 		if v {
@@ -128,7 +143,9 @@ func (s *ChannelsSidebar) collapsedSlice() []string {
 // ToggleFavoriteOnActive flips the favorite state of the highlighted channel.
 // Returns true if a change was made.
 func (s *ChannelsSidebar) ToggleFavoriteOnActive() bool {
+	s.mu.Lock()
 	if s.activeID == "" {
+		s.mu.Unlock()
 		return false
 	}
 	if s.favorites[s.activeID] {
@@ -136,14 +153,18 @@ func (s *ChannelsSidebar) ToggleFavoriteOnActive() bool {
 	} else {
 		s.favorites[s.activeID] = true
 	}
-	s.rebuildRows()
-	if s.onFavoritesChanged != nil {
-		s.onFavoritesChanged(s.favoritesSlice())
+	s.rebuildRowsLocked()
+	onFavoritesChanged := s.onFavoritesChanged
+	favs := s.favoritesSliceLocked()
+	s.mu.Unlock()
+
+	if onFavoritesChanged != nil {
+		onFavoritesChanged(favs)
 	}
 	return true
 }
 
-func (s *ChannelsSidebar) favoritesSlice() []string {
+func (s *ChannelsSidebar) favoritesSliceLocked() []string {
 	out := make([]string, 0, len(s.favorites))
 	for id := range s.favorites {
 		out = append(out, id)
@@ -155,6 +176,8 @@ func (s *ChannelsSidebar) favoritesSlice() []string {
 // FirstID returns the ID of the first selectable (non-header) row, or "" if
 // the list has no channel rows yet.
 func (s *ChannelsSidebar) FirstID() string {
+	s.mu.Lock()
+	defer s.mu.Unlock()
 	for _, r := range s.rows {
 		if r.kind == rowChannel {
 			return r.channel.ID
@@ -165,6 +188,7 @@ func (s *ChannelsSidebar) FirstID() string {
 
 // PageSize returns the number of fully visible items minus one for overlap.
 func (s *ChannelsSidebar) PageSize() int {
+	// list.Position is not protected by mutex as it should only be touched by UI thread.
 	if s.list.Position.Count > 1 {
 		return s.list.Position.Count - 1
 	}
@@ -187,6 +211,8 @@ func rowKeyFor(r *sidebarRow) string {
 // the cursor lands on a header, and (channelID, true) when it lands on a
 // channel — callers should only switch the active channel in the third case.
 func (s *ChannelsSidebar) MoveSelection(delta int) (string, bool) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
 	if len(s.rows) == 0 {
 		return "", false
 	}
@@ -254,6 +280,8 @@ func (s *ChannelsSidebar) MoveSelection(delta int) (string, bool) {
 // cursor, if any. Returns true if a toggle happened so the caller can
 // invalidate the window.
 func (s *ChannelsSidebar) ToggleCursorHeader() bool {
+	s.mu.Lock()
+	defer s.mu.Unlock()
 	if s.cursorKey == "" {
 		return false
 	}
@@ -265,9 +293,13 @@ func (s *ChannelsSidebar) ToggleCursorHeader() bool {
 			continue
 		}
 		s.collapsed[r.headerKey] = !s.collapsed[r.headerKey]
-		s.rebuildRows()
+		s.rebuildRowsLocked()
 		if s.onCollapsedChanged != nil {
-			s.onCollapsedChanged(s.collapsedSlice())
+			onCollapsedChanged := s.onCollapsedChanged
+			collapsed := s.collapsedSliceLocked()
+			s.mu.Unlock()
+			onCollapsedChanged(collapsed)
+			s.mu.Lock()
 		}
 		return true
 	}
@@ -276,14 +308,16 @@ func (s *ChannelsSidebar) ToggleCursorHeader() bool {
 
 // SetChannels rebuilds the row list from the latest channel snapshot.
 func (s *ChannelsSidebar) SetChannels(channels []slack.Channel) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
 	s.raw = channels
-	s.rebuildRows()
+	s.dirty = true
 }
 
 // rebuildRows splits channels into Favorites plus the four conversation-type
 // groups (channels, external, DMs, group DMs) and sorts each. Click state for
 // previously rendered channel rows is reused so highlights survive the rebuild.
-func (s *ChannelsSidebar) rebuildRows() {
+func (s *ChannelsSidebar) rebuildRowsLocked() {
 	old := make(map[string]*sidebarRow, len(s.rows))
 	for _, r := range s.rows {
 		switch r.kind {
@@ -307,11 +341,6 @@ func (s *ChannelsSidebar) rebuildRows() {
 		}
 		if s.hideEmpty && !isFav && !ch.IsIM && !ch.IsMPIM {
 			slog.Debug("sidebar: keeping channel", "id", ch.ID, "name", ch.Name, "unread", ch.UnreadCount, "latest", ch.LatestTS, "verified", ch.LatestTSVerified)
-		}
-
-		if ch.MentionCount > 0 {
-			hasAnyMention := true
-			_ = hasAnyMention // suppress unused
 		}
 
 		if ch.MentionCount > 0 {
@@ -424,18 +453,19 @@ func headerKey(h string) string { return "__hdr:" + h }
 
 // Layout draws the sidebar.
 func (s *ChannelsSidebar) Layout(gtx layout.Context, th *Theme, fm *slack.Formatter) layout.Dimensions {
-	dirty := false
+	s.mu.Lock()
 	if s.showOnlyRecent != th.ShowOnlyRecentChannels {
 		s.showOnlyRecent = th.ShowOnlyRecentChannels
-		dirty = true
+		s.dirty = true
 	}
 	if s.hideEmpty != th.HideEmptyChannels {
 		s.hideEmpty = th.HideEmptyChannels
-		dirty = true
+		s.dirty = true
 	}
 
-	if dirty && s.raw != nil {
-		s.rebuildRows()
+	if s.dirty && s.raw != nil {
+		s.rebuildRowsLocked()
+		s.dirty = false
 	}
 
 	// Process row clicks.
@@ -447,7 +477,11 @@ func (s *ChannelsSidebar) Layout(gtx layout.Context, th *Theme, fm *slack.Format
 				s.activeID = r.channel.ID
 				s.cursorKey = r.channel.ID
 				if s.onSelect != nil {
-					s.onSelect(r.channel.ID)
+					onSelect := s.onSelect
+					id := r.channel.ID
+					s.mu.Unlock()
+					onSelect(id)
+					s.mu.Lock()
 				}
 			}
 		case rowHeader:
@@ -459,16 +493,29 @@ func (s *ChannelsSidebar) Layout(gtx layout.Context, th *Theme, fm *slack.Format
 	}
 	if toggleHeader != "" {
 		s.collapsed[toggleHeader] = !s.collapsed[toggleHeader]
-		s.rebuildRows()
+		s.rebuildRowsLocked()
 		if s.onCollapsedChanged != nil {
-			s.onCollapsedChanged(s.collapsedSlice())
+			onCollapsedChanged := s.onCollapsedChanged
+			collapsed := s.collapsedSliceLocked()
+			s.mu.Unlock()
+			onCollapsedChanged(collapsed)
+			s.mu.Lock()
 		}
 	}
 
+	n := len(s.rows)
+	s.mu.Unlock()
+
 	return withBorder(gtx, th.SidebarPal.Border, borders{Right: true}, func(gtx layout.Context) layout.Dimensions {
 		return paintedBg(gtx, th.SidebarPal.BgSidebar, func(gtx layout.Context) layout.Dimensions {
-			return material.List(th.Mat, &s.list).Layout(gtx, len(s.rows), func(gtx layout.Context, idx int) layout.Dimensions {
+			return material.List(th.Mat, &s.list).Layout(gtx, n, func(gtx layout.Context, idx int) layout.Dimensions {
+				s.mu.Lock()
+				if idx >= len(s.rows) {
+					s.mu.Unlock()
+					return layout.Dimensions{}
+				}
 				r := s.rows[idx]
+				s.mu.Unlock()
 				if r.kind == rowHeader {
 					return s.layoutHeader(gtx, th, r)
 				}
@@ -483,7 +530,10 @@ func (s *ChannelsSidebar) layoutHeader(gtx layout.Context, th *Theme, r *sidebar
 	if r.collapsed {
 		chevron = "▸ "
 	}
+	s.mu.Lock()
 	selected := s.cursorKey == headerKey(r.headerKey)
+	s.mu.Unlock()
+
 	bg := th.SidebarPal.BgSidebar
 	textColor := th.SidebarPal.TextMuted
 	if selected {
@@ -516,7 +566,10 @@ func (s *ChannelsSidebar) layoutHeader(gtx layout.Context, th *Theme, r *sidebar
 }
 
 func (s *ChannelsSidebar) layoutRow(gtx layout.Context, th *Theme, fm *slack.Formatter, r *sidebarRow) layout.Dimensions {
+	s.mu.Lock()
 	active := r.channel.ID == s.activeID
+	s.mu.Unlock()
+
 	hasUnread := r.channel.UnreadCount > 0
 	hasMention := r.channel.MentionCount > 0
 	if r.channel.IsIM || r.channel.IsMPIM {

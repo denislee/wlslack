@@ -102,6 +102,10 @@ type App struct {
 	composerWasFocused bool
 
 	backgroundTasks map[string]string // ID -> description
+
+	// Tracks if the last Up/Down press hit a boundary without moving.
+	atUpBoundary   bool
+	atDownBoundary bool
 }
 
 // Run blocks running the GUI until the window is closed.
@@ -408,6 +412,8 @@ func (a *App) handleKeys(gtx layout.Context) {
 	filters := []event.Filter{
 		// Global jump-to shortcut.
 		key.Filter{Name: "K", Required: key.ModCtrl},
+		// Global force-refresh shortcut.
+		key.Filter{Name: "R", Required: key.ModCtrl},
 	}
 	if a.messageEditorOpen {
 		meTag := a.messageEditor.FocusTag()
@@ -423,12 +429,15 @@ func (a *App) handleKeys(gtx layout.Context) {
 			key.Filter{Focus: switcherEditor, Name: "[", Required: key.ModCtrl},
 			key.Filter{Focus: switcherEditor, Name: key.NameUpArrow},
 			key.Filter{Focus: switcherEditor, Name: key.NameDownArrow},
+			key.Filter{Focus: switcherEditor, Name: key.NameLeftArrow, Required: key.ModCtrl},
+			key.Filter{Focus: switcherEditor, Name: key.NameRightArrow, Required: key.ModCtrl},
 			key.Filter{Focus: switcherEditor, Name: key.NameReturn},
 			key.Filter{Focus: switcherEditor, Name: key.NameTab},
 			key.Filter{Focus: switcherEditor, Name: "N", Required: key.ModCtrl},
 			key.Filter{Focus: switcherEditor, Name: "P", Required: key.ModCtrl},
 			key.Filter{Focus: switcherEditor, Name: "Y", Required: key.ModCtrl},
 			key.Filter{Focus: switcherEditor, Name: "W", Required: key.ModCtrl},
+			key.Filter{Focus: switcherEditor, Name: key.NameDeleteBackward, Required: key.ModCtrl},
 			key.Filter{Focus: switcherEditor, Name: "A", Required: key.ModCtrl},
 			key.Filter{Focus: switcherEditor, Name: "E", Required: key.ModCtrl},
 			key.Filter{Focus: switcherEditor, Name: "F", Required: key.ModCtrl},
@@ -442,11 +451,14 @@ func (a *App) handleKeys(gtx layout.Context) {
 			key.Filter{Focus: reactionEditor, Name: "[", Required: key.ModCtrl},
 			key.Filter{Focus: reactionEditor, Name: key.NameUpArrow},
 			key.Filter{Focus: reactionEditor, Name: key.NameDownArrow},
+			key.Filter{Focus: reactionEditor, Name: key.NameLeftArrow, Required: key.ModCtrl},
+			key.Filter{Focus: reactionEditor, Name: key.NameRightArrow, Required: key.ModCtrl},
 			key.Filter{Focus: reactionEditor, Name: key.NameReturn},
 			key.Filter{Focus: reactionEditor, Name: "N", Required: key.ModCtrl},
 			key.Filter{Focus: reactionEditor, Name: "P", Required: key.ModCtrl},
 			key.Filter{Focus: reactionEditor, Name: "Y", Required: key.ModCtrl},
 			key.Filter{Focus: reactionEditor, Name: "W", Required: key.ModCtrl},
+			key.Filter{Focus: reactionEditor, Name: key.NameDeleteBackward, Required: key.ModCtrl},
 			key.Filter{Focus: reactionEditor, Name: "A", Required: key.ModCtrl},
 			key.Filter{Focus: reactionEditor, Name: "E", Required: key.ModCtrl},
 			key.Filter{Focus: reactionEditor, Name: "F", Required: key.ModCtrl},
@@ -459,12 +471,19 @@ func (a *App) handleKeys(gtx layout.Context) {
 			key.Filter{Focus: &a.composer.editor, Name: key.NameEscape},
 			key.Filter{Focus: &a.composer.editor, Name: "[", Required: key.ModCtrl},
 			key.Filter{Focus: &a.composer.editor, Name: "W", Required: key.ModCtrl},
+			key.Filter{Focus: &a.composer.editor, Name: key.NameDeleteBackward, Required: key.ModCtrl},
 			key.Filter{Focus: &a.composer.editor, Name: "T", Required: key.ModCtrl},
 			key.Filter{Focus: &a.composer.editor, Name: "A", Required: key.ModCtrl},
 			key.Filter{Focus: &a.composer.editor, Name: "E", Required: key.ModCtrl},
 			key.Filter{Focus: &a.composer.editor, Name: "F", Required: key.ModCtrl},
 			key.Filter{Focus: &a.composer.editor, Name: "B", Required: key.ModCtrl},
 			key.Filter{Focus: &a.composer.editor, Name: "C", Required: key.ModCtrl},
+			key.Filter{Focus: &a.composer.editor, Name: "P", Required: key.ModCtrl},
+			key.Filter{Focus: &a.composer.editor, Name: "N", Required: key.ModCtrl},
+			key.Filter{Focus: &a.composer.editor, Name: key.NameLeftArrow, Required: key.ModCtrl},
+			key.Filter{Focus: &a.composer.editor, Name: key.NameRightArrow, Required: key.ModCtrl},
+			key.Filter{Focus: &a.composer.editor, Name: key.NameUpArrow},
+			key.Filter{Focus: &a.composer.editor, Name: key.NameDownArrow},
 		)
 		if a.composer.mentionPicker.Active() {
 			filters = append(filters,
@@ -472,8 +491,6 @@ func (a *App) handleKeys(gtx layout.Context) {
 				key.Filter{Focus: &a.composer.editor, Name: key.NameDownArrow},
 				key.Filter{Focus: &a.composer.editor, Name: key.NameReturn},
 				key.Filter{Focus: &a.composer.editor, Name: key.NameTab},
-				key.Filter{Focus: &a.composer.editor, Name: "N", Required: key.ModCtrl},
-				key.Filter{Focus: &a.composer.editor, Name: "P", Required: key.ModCtrl},
 				key.Filter{Focus: &a.composer.editor, Name: "Y", Required: key.ModCtrl},
 			)
 		}
@@ -537,6 +554,8 @@ func (a *App) handleKeys(gtx layout.Context) {
 			} else {
 				a.openSwitcher()
 			}
+		case kev.Name == "R" && kev.Modifiers.Contain(key.ModCtrl):
+			a.forceRefresh()
 		case kev.Name == key.NameEscape || (kev.Name == "[" && kev.Modifiers.Contain(key.ModCtrl)):
 			switch {
 			case a.settingsOpen:
@@ -646,11 +665,17 @@ func (a *App) handleKeys(gtx layout.Context) {
 		case a.switcherOpen && (kev.Name == key.NameDownArrow || (kev.Name == "N" && kev.Modifiers.Contain(key.ModCtrl))):
 			a.switcher.MoveSelection(1)
 			a.w.Invalidate()
-		case a.switcherOpen && kev.Name == "W" && kev.Modifiers.Contain(key.ModCtrl):
+		case a.switcherOpen && kev.Name == key.NameLeftArrow && kev.Modifiers.Contain(key.ModCtrl):
+			a.switcher.MoveWord(-1)
+			a.w.Invalidate()
+		case a.switcherOpen && kev.Name == key.NameRightArrow && kev.Modifiers.Contain(key.ModCtrl):
+			a.switcher.MoveWord(1)
+			a.w.Invalidate()
+		case a.switcherOpen && (kev.Name == "W" || kev.Name == key.NameDeleteBackward) && kev.Modifiers.Contain(key.ModCtrl):
 			a.switcher.DeleteLastWord()
 			a.w.Invalidate()
 		case a.switcherOpen && kev.Name == "A" && kev.Modifiers.Contain(key.ModCtrl):
-			a.switcher.MoveToStart()
+			a.switcher.SelectAll()
 			a.w.Invalidate()
 		case a.switcherOpen && kev.Name == "E" && kev.Modifiers.Contain(key.ModCtrl):
 			a.switcher.MoveToEnd()
@@ -675,11 +700,17 @@ func (a *App) handleKeys(gtx layout.Context) {
 		case a.reactionPickerOpen && (kev.Name == key.NameDownArrow || (kev.Name == "N" && kev.Modifiers.Contain(key.ModCtrl))):
 			a.reactionPicker.MoveSelection(1)
 			a.w.Invalidate()
-		case a.reactionPickerOpen && kev.Name == "W" && kev.Modifiers.Contain(key.ModCtrl):
+		case a.reactionPickerOpen && kev.Name == key.NameLeftArrow && kev.Modifiers.Contain(key.ModCtrl):
+			a.reactionPicker.MoveWord(-1)
+			a.w.Invalidate()
+		case a.reactionPickerOpen && kev.Name == key.NameRightArrow && kev.Modifiers.Contain(key.ModCtrl):
+			a.reactionPicker.MoveWord(1)
+			a.w.Invalidate()
+		case a.reactionPickerOpen && (kev.Name == "W" || kev.Name == key.NameDeleteBackward) && kev.Modifiers.Contain(key.ModCtrl):
 			a.reactionPicker.DeleteLastWord()
 			a.w.Invalidate()
 		case a.reactionPickerOpen && kev.Name == "A" && kev.Modifiers.Contain(key.ModCtrl):
-			a.reactionPicker.MoveToStart()
+			a.reactionPicker.SelectAll()
 			a.w.Invalidate()
 		case a.reactionPickerOpen && kev.Name == "E" && kev.Modifiers.Contain(key.ModCtrl):
 			a.reactionPicker.MoveToEnd()
@@ -693,11 +724,17 @@ func (a *App) handleKeys(gtx layout.Context) {
 		case a.reactionPickerOpen && kev.Name == "C" && kev.Modifiers.Contain(key.ModCtrl):
 			a.reactionPicker.Clear()
 			a.w.Invalidate()
-		case composerFocused && kev.Name == "W" && kev.Modifiers.Contain(key.ModCtrl):
+		case composerFocused && (kev.Name == "W" || kev.Name == key.NameDeleteBackward) && kev.Modifiers.Contain(key.ModCtrl):
 			a.composer.DeleteLastWord()
 			a.w.Invalidate()
+		case composerFocused && kev.Name == key.NameLeftArrow && kev.Modifiers.Contain(key.ModCtrl):
+			a.composer.MoveWord(-1)
+			a.w.Invalidate()
+		case composerFocused && kev.Name == key.NameRightArrow && kev.Modifiers.Contain(key.ModCtrl):
+			a.composer.MoveWord(1)
+			a.w.Invalidate()
 		case composerFocused && kev.Name == "A" && kev.Modifiers.Contain(key.ModCtrl):
-			a.composer.MoveToStart()
+			a.composer.SelectAll()
 			a.w.Invalidate()
 		case composerFocused && kev.Name == "E" && kev.Modifiers.Contain(key.ModCtrl):
 			a.composer.MoveToEnd()
@@ -739,11 +776,68 @@ func (a *App) handleKeys(gtx layout.Context) {
 				}()
 			})
 			a.w.Invalidate()
-		case composerFocused && a.composer.mentionPicker.Active() && (kev.Name == key.NameUpArrow || (kev.Name == "P" && kev.Modifiers.Contain(key.ModCtrl))):
+		case composerFocused && a.composer.mentionPicker.Active() && kev.Name == key.NameUpArrow:
 			a.composer.mentionPicker.MoveSelection(-1)
+			a.atUpBoundary = false
+			a.atDownBoundary = false
 			a.w.Invalidate()
-		case composerFocused && a.composer.mentionPicker.Active() && (kev.Name == key.NameDownArrow || (kev.Name == "N" && kev.Modifiers.Contain(key.ModCtrl))):
+		case composerFocused && kev.Name == key.NameUpArrow:
+			oldPos, _ := a.composer.editor.Selection()
+			a.composer.MoveLine(-1)
+			newPos, _ := a.composer.editor.Selection()
+			if oldPos == newPos {
+				if a.atUpBoundary {
+					if oldPos == 0 {
+						a.composer.HistoryPrev()
+					} else {
+						a.composer.MoveToStart()
+					}
+				} else {
+					a.atUpBoundary = true
+				}
+			} else {
+				a.atUpBoundary = false
+			}
+			a.atDownBoundary = false
+			a.w.Invalidate()
+		case composerFocused && a.composer.mentionPicker.Active() && kev.Name == key.NameDownArrow:
 			a.composer.mentionPicker.MoveSelection(1)
+			a.atUpBoundary = false
+			a.atDownBoundary = false
+			a.w.Invalidate()
+		case composerFocused && kev.Name == key.NameDownArrow:
+			oldPos, _ := a.composer.editor.Selection()
+			a.composer.MoveLine(1)
+			newPos, _ := a.composer.editor.Selection()
+			if oldPos == newPos {
+				lastPos := len([]rune(a.composer.editor.Text()))
+				if a.atDownBoundary {
+					if oldPos == lastPos {
+						a.composer.HistoryNext()
+					} else {
+						a.composer.MoveToEnd()
+					}
+				} else {
+					a.atDownBoundary = true
+				}
+			} else {
+				a.atDownBoundary = false
+			}
+			a.atUpBoundary = false
+			a.w.Invalidate()
+		case composerFocused && kev.Name == "P" && kev.Modifiers.Contain(key.ModCtrl):
+			if a.composer.mentionPicker.Active() {
+				a.composer.mentionPicker.MoveSelection(-1)
+			} else {
+				a.composer.HistoryPrev()
+			}
+			a.w.Invalidate()
+		case composerFocused && kev.Name == "N" && kev.Modifiers.Contain(key.ModCtrl):
+			if a.composer.mentionPicker.Active() {
+				a.composer.mentionPicker.MoveSelection(1)
+			} else {
+				a.composer.HistoryNext()
+			}
 			a.w.Invalidate()
 		case composerFocused && a.composer.mentionPicker.Active() && (kev.Name == key.NameReturn || kev.Name == key.NameTab || (kev.Name == "Y" && kev.Modifiers.Contain(key.ModCtrl))):
 			a.composer.mentionPicker.Submit()
@@ -1612,6 +1706,31 @@ func (a *App) pollChannels() {
 				}(priority)
 			}
 		}
+	}
+}
+
+// forceRefresh re-fetches whatever the user is currently looking at: the
+// active thread (if open), the unreads aggregate, or the active channel.
+// It also re-syncs the channel list so unread badges update.
+func (a *App) forceRefresh() {
+	go func() {
+		_, _ = a.client.GetChannels(a.cfg.Channels.Types, a.cfg.Channels.Pinned)
+		a.w.Invalidate()
+	}()
+	if a.messages.InThread() {
+		chID, threadTS := a.messages.ThreadInfo()
+		if chID != "" && threadTS != "" {
+			go a.fetchThread(chID, threadTS)
+		}
+	}
+	id := a.getActiveID()
+	switch id {
+	case "":
+		return
+	case "__UNREADS__":
+		go a.fetchAllUnreads()
+	default:
+		go a.fetchMessages(id)
 	}
 }
 

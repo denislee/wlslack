@@ -3,6 +3,7 @@ package ui
 import (
 	"image"
 	"strings"
+	"sync"
 
 	"gioui.org/f32"
 	"gioui.org/font"
@@ -20,6 +21,8 @@ import (
 // message. The user types to filter the emoji catalog and Enter applies the
 // highlighted emoji as a reaction.
 type ReactionPicker struct {
+	mu         sync.Mutex
+	dirty      bool
 	editor     widget.Editor
 	list       widget.List
 	all        []slack.EmojiEntry
@@ -47,13 +50,16 @@ func newReactionPicker(images *slack.ImageLoader, onSelect func(string)) *Reacti
 
 // SetEmojis stores the unfiltered catalog used as the search corpus.
 func (r *ReactionPicker) SetEmojis(entries []slack.EmojiEntry) {
+	r.mu.Lock()
 	r.all = entries
-	r.refilter()
+	r.dirty = true
+	r.mu.Unlock()
 }
 
 // Reset clears the query and selection. Call when the picker opens.
 func (r *ReactionPicker) Reset(detailed []slack.Reaction, fm *slack.Formatter) {
 	r.editor.SetText("")
+	r.mu.Lock()
 	r.lastQuery = ""
 	r.selected = 0
 	r.existing = nil
@@ -78,6 +84,7 @@ func (r *ReactionPicker) Reset(detailed []slack.Reaction, fm *slack.Formatter) {
 
 	r.list.Position.First = 0
 	r.list.Position.Offset = 0
+	r.mu.Unlock()
 	r.refilter()
 }
 
@@ -120,6 +127,11 @@ func (r *ReactionPicker) MoveToStart() {
 	r.editor.SetCaret(0, 0)
 }
 
+func (r *ReactionPicker) SelectAll() {
+	n := len([]rune(r.editor.Text()))
+	r.editor.SetCaret(0, n)
+}
+
 func (r *ReactionPicker) MoveToEnd() {
 	n := len([]rune(r.editor.Text()))
 	r.editor.SetCaret(n, n)
@@ -138,12 +150,18 @@ func (r *ReactionPicker) MoveCursor(delta int) {
 	r.editor.SetCaret(newPos, newPos)
 }
 
+func (r *ReactionPicker) MoveWord(dir int) {
+	MoveWord(&r.editor, dir)
+}
+
 func (r *ReactionPicker) Clear() {
 	r.editor.SetText("")
 }
 
 // MoveSelection shifts the highlighted row, scrolling to keep it in view.
 func (r *ReactionPicker) MoveSelection(delta int) {
+	r.mu.Lock()
+	defer r.mu.Unlock()
 	if len(r.rows) == 0 {
 		return
 	}
@@ -172,6 +190,8 @@ func (r *ReactionPicker) MoveSelection(delta int) {
 
 // Submit fires onSelect for the currently highlighted emoji, if any.
 func (r *ReactionPicker) Submit() {
+	r.mu.Lock()
+	defer r.mu.Unlock()
 	if r.selected < 0 || r.selected >= len(r.rows) {
 		return
 	}
@@ -182,23 +202,37 @@ func (r *ReactionPicker) Submit() {
 
 func (r *ReactionPicker) refilter() {
 	query := strings.TrimSpace(strings.ToLower(r.editor.Text()))
+
+	r.mu.Lock()
 	r.lastQuery = query
+	all := r.all
+	existing := make([]string, len(r.existing))
+	copy(existing, r.existing)
+	reactorMap := make(map[string]string, len(r.reactorMap))
+	for k, v := range r.reactorMap {
+		reactorMap[k] = v
+	}
+	r.mu.Unlock()
+
+	r.mu.Lock()
+	defer r.mu.Unlock()
+
 	out := r.rows[:0]
 
 	existingMap := make(map[string]bool)
-	for _, name := range r.existing {
+	for _, name := range existing {
 		existingMap[name] = true
 	}
 
-	for _, e := range r.all {
+	for _, e := range all {
 		if existingMap[e.Name] {
 			if query == "" || strings.Contains(e.Name, query) {
-				out = append(out, &reactionRow{entry: e, reactors: r.reactorMap[e.Name]})
+				out = append(out, &reactionRow{entry: e, reactors: reactorMap[e.Name]})
 			}
 		}
 	}
 
-	for _, e := range r.all {
+	for _, e := range all {
 		if !existingMap[e.Name] {
 			if query == "" || strings.Contains(e.Name, query) {
 				out = append(out, &reactionRow{entry: e})
@@ -223,16 +257,33 @@ func (r *ReactionPicker) Layout(gtx layout.Context, th *Theme) layout.Dimensions
 			break
 		}
 	}
-	if strings.TrimSpace(strings.ToLower(r.editor.Text())) != r.lastQuery {
+
+	r.mu.Lock()
+	dirty := r.dirty
+	r.dirty = false
+	lastQuery := r.lastQuery
+	r.mu.Unlock()
+
+	if dirty || strings.TrimSpace(strings.ToLower(r.editor.Text())) != lastQuery {
 		r.refilter()
 	}
 
+	r.mu.Lock()
+	var clickedRow int = -1
 	for i, row := range r.rows {
 		if row.click.Clicked(gtx) {
-			r.selected = i
-			r.Submit()
+			clickedRow = i
+			break
 		}
 	}
+	if clickedRow != -1 {
+		r.selected = clickedRow
+		r.mu.Unlock()
+		r.Submit()
+		r.mu.Lock()
+	}
+	n := len(r.rows)
+	r.mu.Unlock()
 
 	return paintedBg(gtx, th.Pal.Bg, func(gtx layout.Context) layout.Dimensions {
 		return layout.Inset{
@@ -269,8 +320,16 @@ func (r *ReactionPicker) Layout(gtx layout.Context, th *Theme) layout.Dimensions
 				}),
 				layout.Rigid(layout.Spacer{Height: unit.Dp(8)}.Layout),
 				layout.Flexed(1, func(gtx layout.Context) layout.Dimensions {
-					return material.List(th.Mat, &r.list).Layout(gtx, len(r.rows), func(gtx layout.Context, idx int) layout.Dimensions {
-						return r.layoutRow(gtx, th, idx, r.rows[idx])
+					return material.List(th.Mat, &r.list).Layout(gtx, n, func(gtx layout.Context, idx int) layout.Dimensions {
+						r.mu.Lock()
+						if idx >= len(r.rows) {
+							r.mu.Unlock()
+							return layout.Dimensions{}
+						}
+						row := r.rows[idx]
+						selected := r.selected
+						r.mu.Unlock()
+						return r.layoutRow(gtx, th, idx, row, selected)
 					})
 				}),
 			)
@@ -278,8 +337,8 @@ func (r *ReactionPicker) Layout(gtx layout.Context, th *Theme) layout.Dimensions
 	})
 }
 
-func (r *ReactionPicker) layoutRow(gtx layout.Context, th *Theme, idx int, row *reactionRow) layout.Dimensions {
-	active := idx == r.selected
+func (r *ReactionPicker) layoutRow(gtx layout.Context, th *Theme, idx int, row *reactionRow, selectedIdx int) layout.Dimensions {
+	active := idx == selectedIdx
 	bg := th.Pal.Bg
 	color := th.Pal.Text
 	if active {

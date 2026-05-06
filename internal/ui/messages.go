@@ -5,6 +5,7 @@ import (
 	"image"
 	"image/color"
 	"image/gif"
+	"sync"
 	"time"
 
 	"gioui.org/f32"
@@ -23,6 +24,7 @@ import (
 
 // MessagesView renders the message list for the active channel.
 type MessagesView struct {
+	mu       sync.Mutex
 	list     widget.List
 	rows     []*messageRow
 	header   string
@@ -84,12 +86,18 @@ func newMessagesView(images *slack.ImageLoader) *MessagesView {
 
 // SetFocused toggles the visual highlight on the selected row. Called by the
 // app when 'l'/'h' move focus between the sidebar and the messages pane.
-func (m *MessagesView) SetFocused(f bool) { m.focused = f }
+func (m *MessagesView) SetFocused(f bool) {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	m.focused = f
+}
 
 // Reset clears selection and re-enables tail-following. Called on channel
 // switch so we land at the latest message and don't carry highlight state
 // across conversations.
 func (m *MessagesView) Reset() {
+	m.mu.Lock()
+	defer m.mu.Unlock()
 	m.selected = -1
 	m.list.ScrollToEnd = true
 	m.list.Position.BeforeEnd = false
@@ -106,6 +114,8 @@ func (m *MessagesView) Reset() {
 // list. If there are no rows yet (cache miss before the API call returns),
 // the request is queued so the next SetMessages applies it.
 func (m *MessagesView) FocusLast() {
+	m.mu.Lock()
+	defer m.mu.Unlock()
 	if m.threadActive {
 		return
 	}
@@ -122,6 +132,8 @@ func (m *MessagesView) FocusLast() {
 
 // FocusMessage lands selection on the message with the given timestamp.
 func (m *MessagesView) FocusMessage(ts string) {
+	m.mu.Lock()
+	defer m.mu.Unlock()
 	if m.threadActive {
 		return
 	}
@@ -144,6 +156,8 @@ func (m *MessagesView) FocusMessage(ts string) {
 
 // PageSize returns the number of fully visible items minus one for overlap.
 func (m *MessagesView) PageSize() int {
+	m.mu.Lock()
+	defer m.mu.Unlock()
 	pos := m.list.Position
 	if m.threadActive {
 		pos = m.threadList.Position
@@ -155,6 +169,8 @@ func (m *MessagesView) PageSize() int {
 }
 
 func (m *MessagesView) CurrentMessages() []slack.Message {
+	m.mu.Lock()
+	defer m.mu.Unlock()
 	rows := m.rows
 	if m.threadActive {
 		rows = m.threadRows
@@ -169,6 +185,8 @@ func (m *MessagesView) CurrentMessages() []slack.Message {
 // HasSelection reports whether the channel-history list (not the thread list)
 // has a highlighted row that 'l' can drill into.
 func (m *MessagesView) HasSelection() bool {
+	m.mu.Lock()
+	defer m.mu.Unlock()
 	return !m.threadActive && m.selected >= 0 && m.selected < len(m.rows)
 }
 
@@ -177,7 +195,9 @@ func (m *MessagesView) HasSelection() bool {
 // channel-history row). Returns nil when nothing is selected. File URLs are
 // excluded — they need Slack auth and don't open in an external browser.
 func (m *MessagesView) SelectedMessageURLs() []string {
-	msg := m.selectedMessage()
+	m.mu.Lock()
+	msg := m.selectedMessageLocked()
+	m.mu.Unlock()
 	if msg == nil {
 		return nil
 	}
@@ -188,7 +208,9 @@ func (m *MessagesView) SelectedMessageURLs() []string {
 // message in the order Slack delivered them. Used by the in-app image viewer
 // when the user presses Enter on a message that has no links.
 func (m *MessagesView) SelectedMessageImages() []slack.File {
-	msg := m.selectedMessage()
+	m.mu.Lock()
+	msg := m.selectedMessageLocked()
+	m.mu.Unlock()
 	if msg == nil {
 		return nil
 	}
@@ -205,14 +227,16 @@ func (m *MessagesView) SelectedMessageImages() []slack.File {
 // mode, otherwise the channel-history row) plus its timestamp. ok is false
 // when nothing is selected.
 func (m *MessagesView) SelectedMessage() (slack.Message, string, bool) {
-	msg := m.selectedMessage()
+	m.mu.Lock()
+	msg := m.selectedMessageLocked()
+	m.mu.Unlock()
 	if msg == nil {
 		return slack.Message{}, "", false
 	}
 	return *msg, msg.Timestamp, true
 }
 
-func (m *MessagesView) selectedMessage() *slack.Message {
+func (m *MessagesView) selectedMessageLocked() *slack.Message {
 	switch {
 	case m.threadActive:
 		if m.threadSelected >= 0 && m.threadSelected < len(m.threadRows) {
@@ -227,17 +251,27 @@ func (m *MessagesView) selectedMessage() *slack.Message {
 }
 
 // InThread reports whether the pane is currently displaying a thread.
-func (m *MessagesView) InThread() bool { return m.threadActive }
+func (m *MessagesView) InThread() bool {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	return m.threadActive
+}
 
 // ThreadInfo returns the channel ID and parent timestamp of the open thread.
-func (m *MessagesView) ThreadInfo() (string, string) { return m.threadChannel, m.threadTS }
+func (m *MessagesView) ThreadInfo() (string, string) {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	return m.threadChannel, m.threadTS
+}
 
 // OpenThread enters thread mode for the currently selected message and
 // returns the channel/thread timestamp the caller should fetch. When the
 // selected row is itself a reply, the thread root (ThreadTS) is used so we
 // always render the full conversation, not just the tail.
 func (m *MessagesView) OpenThread(channelID string) (string, string, bool) {
-	if !m.HasSelection() || channelID == "" {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	if m.threadActive || m.selected < 0 || m.selected >= len(m.rows) || channelID == "" {
 		return "", "", false
 	}
 	r := m.rows[m.selected]
@@ -270,6 +304,8 @@ func (m *MessagesView) OpenThread(channelID string) (string, string, bool) {
 // Returns false if the pane wasn't in thread mode to begin with. Also
 // dismisses the author panel since it's a child of the thread view.
 func (m *MessagesView) CloseThread() bool {
+	m.mu.Lock()
+	defer m.mu.Unlock()
 	if !m.threadActive {
 		return false
 	}
@@ -286,27 +322,39 @@ func (m *MessagesView) CloseThread() bool {
 }
 
 func (m *MessagesView) DeletePendingTS() string {
+	m.mu.Lock()
+	defer m.mu.Unlock()
 	return m.deletePendingTS
 }
 
 func (m *MessagesView) SetDeletePendingTS(ts string) {
+	m.mu.Lock()
+	defer m.mu.Unlock()
 	m.deletePendingTS = ts
 }
 
 // HasThreadSelection reports whether the thread list has a highlighted row
 // — used by the app to decide whether 'l' should drill into the author panel.
 func (m *MessagesView) HasThreadSelection() bool {
+	m.mu.Lock()
+	defer m.mu.Unlock()
 	return m.threadActive && m.threadSelected >= 0 && m.threadSelected < len(m.threadRows)
 }
 
 // AuthorOpen reports whether the author detail panel is visible.
-func (m *MessagesView) AuthorOpen() bool { return m.authorOpen }
+func (m *MessagesView) AuthorOpen() bool {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	return m.authorOpen
+}
 
 // OpenAuthor populates and shows the author panel for the currently selected
 // thread message. fm is consulted for the cached profile; missing profile data
 // just yields a panel with whatever IDs we have on the message itself.
 func (m *MessagesView) OpenAuthor(fm *slack.Formatter) bool {
-	if !m.HasThreadSelection() {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	if !m.threadActive || m.threadSelected < 0 || m.threadSelected >= len(m.threadRows) {
 		return false
 	}
 	r := m.threadRows[m.threadSelected]
@@ -356,6 +404,8 @@ func (m *MessagesView) OpenAuthor(fm *slack.Formatter) bool {
 
 // CloseAuthor hides the author panel. Returns false when it wasn't open.
 func (m *MessagesView) CloseAuthor() bool {
+	m.mu.Lock()
+	defer m.mu.Unlock()
 	if !m.authorOpen {
 		return false
 	}
@@ -370,6 +420,8 @@ func (m *MessagesView) CloseAuthor() bool {
 // MoveAuthorSelection shifts the highlighted field by delta, clamping at the
 // ends. Returns false when the selection didn't change.
 func (m *MessagesView) MoveAuthorSelection(delta int) bool {
+	m.mu.Lock()
+	defer m.mu.Unlock()
 	if !m.authorOpen || len(m.authorRows) == 0 {
 		return false
 	}
@@ -390,6 +442,8 @@ func (m *MessagesView) MoveAuthorSelection(delta int) bool {
 // AuthorSelectedValue returns the value of the highlighted field, used by 'y'
 // to copy to the clipboard.
 func (m *MessagesView) AuthorSelectedValue() (string, bool) {
+	m.mu.Lock()
+	defer m.mu.Unlock()
 	if !m.authorOpen || m.authorSelected < 0 || m.authorSelected >= len(m.authorRows) {
 		return "", false
 	}
@@ -400,6 +454,8 @@ func (m *MessagesView) AuthorSelectedValue() (string, bool) {
 // parent first followed by replies — we render the whole sequence so the
 // reader sees the original message above the conversation.
 func (m *MessagesView) SetThreadMessages(msgs []slack.Message) {
+	m.mu.Lock()
+	defer m.mu.Unlock()
 	if !m.threadActive {
 		return
 	}
@@ -435,14 +491,16 @@ func (m *MessagesView) SetThreadMessages(msgs []slack.Message) {
 // MoveSelection shifts the selection by delta and scrolls the active list to
 // keep the new row visible. Returns false when there's nothing to select.
 func (m *MessagesView) MoveSelection(delta int) bool {
+	m.mu.Lock()
+	defer m.mu.Unlock()
 	m.deletePendingTS = ""
 	if m.threadActive {
-		return moveSelection(&m.threadSelected, m.threadRows, &m.threadList, delta)
+		return moveSelectionLocked(&m.threadSelected, m.threadRows, &m.threadList, delta)
 	}
-	return moveSelection(&m.selected, m.rows, &m.list, delta)
+	return moveSelectionLocked(&m.selected, m.rows, &m.list, delta)
 }
 
-func moveSelection(selected *int, rows []*messageRow, list *widget.List, delta int) bool {
+func moveSelectionLocked(selected *int, rows []*messageRow, list *widget.List, delta int) bool {
 	if len(rows) == 0 {
 		return false
 	}
@@ -489,6 +547,8 @@ func moveSelection(selected *int, rows []*messageRow, list *widget.List, delta i
 
 // SetHeader updates the channel name shown above the messages.
 func (m *MessagesView) SetHeader(name, topic string) {
+	m.mu.Lock()
+	defer m.mu.Unlock()
 	m.header = name
 	m.topic = topic
 }
@@ -496,6 +556,8 @@ func (m *MessagesView) SetHeader(name, topic string) {
 // SetMessages replaces the displayed messages, preserving rich-text state by
 // timestamp.
 func (m *MessagesView) SetMessages(msgs []slack.Message) {
+	m.mu.Lock()
+	defer m.mu.Unlock()
 	old := make(map[string]*messageRow, len(m.rows))
 	for _, r := range m.rows {
 		old[r.msg.Timestamp] = r
@@ -555,12 +617,16 @@ func (m *MessagesView) SetMessages(msgs []slack.Message) {
 // author panel is open, it's rendered as a fixed-width side frame to the
 // right of the message list.
 func (m *MessagesView) Layout(gtx layout.Context, th *Theme, fmt *slack.Formatter) layout.Dimensions {
+	m.mu.Lock()
+	authorOpen := m.authorOpen
+	m.mu.Unlock()
+
 	return layout.Flex{Axis: layout.Horizontal}.Layout(gtx,
 		layout.Flexed(1, func(gtx layout.Context) layout.Dimensions {
 			return m.layoutMessages(gtx, th, fmt)
 		}),
 		layout.Rigid(func(gtx layout.Context) layout.Dimensions {
-			if !m.authorOpen {
+			if !authorOpen {
 				return layout.Dimensions{}
 			}
 			gtx.Constraints.Min.X = gtx.Dp(unit.Dp(320))
@@ -571,20 +637,28 @@ func (m *MessagesView) Layout(gtx layout.Context, th *Theme, fmt *slack.Formatte
 }
 
 func (m *MessagesView) layoutMessages(gtx layout.Context, th *Theme, fmt *slack.Formatter) layout.Dimensions {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+
 	list := &m.list
 	rows := m.rows
 	if m.threadActive {
 		list = &m.threadList
 		rows = m.threadRows
 	}
+	n := len(rows)
+
 	return layout.Flex{Axis: layout.Vertical}.Layout(gtx,
 		layout.Rigid(func(gtx layout.Context) layout.Dimensions {
-			return m.layoutHeader(gtx, th)
+			return m.layoutHeaderLocked(gtx, th)
 		}),
 		layout.Flexed(1, func(gtx layout.Context) layout.Dimensions {
 			return paintedBg(gtx, th.Pal.Bg, func(gtx layout.Context) layout.Dimensions {
-				return material.List(th.Mat, list).Layout(gtx, len(rows), func(gtx layout.Context, idx int) layout.Dimensions {
-					return m.layoutRow(gtx, th, fmt, idx, rows[idx])
+				return material.List(th.Mat, list).Layout(gtx, n, func(gtx layout.Context, idx int) layout.Dimensions {
+					if idx >= len(rows) {
+						return layout.Dimensions{}
+					}
+					return m.layoutRowLocked(gtx, th, fmt, idx, rows)
 				})
 			})
 		}),
@@ -592,6 +666,9 @@ func (m *MessagesView) layoutMessages(gtx layout.Context, th *Theme, fmt *slack.
 }
 
 func (m *MessagesView) layoutAuthor(gtx layout.Context, th *Theme) layout.Dimensions {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+
 	return withBorder(gtx, th.Pal.Border, borders{Left: true}, func(gtx layout.Context) layout.Dimensions {
 	return paintedBg(gtx, th.Pal.BgSidebar, func(gtx layout.Context) layout.Dimensions {
 		return layout.Inset{
@@ -602,13 +679,13 @@ func (m *MessagesView) layoutAuthor(gtx layout.Context, th *Theme) layout.Dimens
 		}.Layout(gtx, func(gtx layout.Context) layout.Dimensions {
 			children := make([]layout.FlexChild, 0, len(m.authorRows)+5)
 			children = append(children, layout.Rigid(func(gtx layout.Context) layout.Dimensions {
-				return m.layoutAuthorHeader(gtx, th)
+				return m.layoutAuthorHeaderLocked(gtx, th)
 			}))
 			children = append(children, layout.Rigid(layout.Spacer{Height: unit.Dp(8)}.Layout))
 			for i, f := range m.authorRows {
 				i, f := i, f
 				children = append(children, layout.Rigid(func(gtx layout.Context) layout.Dimensions {
-					return m.layoutAuthorField(gtx, th, i, f)
+					return m.layoutAuthorFieldLocked(gtx, th, i, f)
 				}))
 			}
 			children = append(children, layout.Rigid(layout.Spacer{Height: unit.Dp(10)}.Layout))
@@ -624,12 +701,12 @@ func (m *MessagesView) layoutAuthor(gtx layout.Context, th *Theme) layout.Dimens
 	})
 }
 
-// layoutAuthorHeader renders the avatar (when known) plus the user's display
+// layoutAuthorHeaderLocked renders the avatar (when known) plus the user's display
 // name above the field list. The avatar is requested from the same async
 // loader used for inline message images, so it pops in after the first frame.
-func (m *MessagesView) layoutAuthorHeader(gtx layout.Context, th *Theme) layout.Dimensions {
+func (m *MessagesView) layoutAuthorHeaderLocked(gtx layout.Context, th *Theme) layout.Dimensions {
 	const avatarDp = 96
-	avatarOp, hasAvatar := m.authorAvatarOp(gtx)
+	avatarOp, hasAvatar := m.authorAvatarOpLocked(gtx)
 	return layout.Flex{Axis: layout.Vertical, Alignment: layout.Middle}.Layout(gtx,
 		layout.Rigid(func(gtx layout.Context) layout.Dimensions {
 			if !hasAvatar {
@@ -661,8 +738,8 @@ func (m *MessagesView) layoutAuthorHeader(gtx layout.Context, th *Theme) layout.
 	)
 }
 
-// authorAvatarOp returns the cached image op for the panel avatar.
-func (m *MessagesView) authorAvatarOp(_ layout.Context) (paint.ImageOp, bool) {
+// authorAvatarOpLocked returns the cached image op for the panel avatar.
+func (m *MessagesView) authorAvatarOpLocked(_ layout.Context) (paint.ImageOp, bool) {
 	if m.authorAvatar == "" || m.images == nil {
 		return paint.ImageOp{}, false
 	}
@@ -670,7 +747,7 @@ func (m *MessagesView) authorAvatarOp(_ layout.Context) (paint.ImageOp, bool) {
 	return op, hasOp
 }
 
-func (m *MessagesView) layoutAuthorField(gtx layout.Context, th *Theme, idx int, f authorField) layout.Dimensions {
+func (m *MessagesView) layoutAuthorFieldLocked(gtx layout.Context, th *Theme, idx int, f authorField) layout.Dimensions {
 	bg := th.Pal.BgSidebar
 	if idx == m.authorSelected {
 		bg = WithAlpha(th.Pal.Selection, 0x40)
@@ -700,7 +777,7 @@ func (m *MessagesView) layoutAuthorField(gtx layout.Context, th *Theme, idx int,
 	})
 }
 
-func (m *MessagesView) layoutHeader(gtx layout.Context, th *Theme) layout.Dimensions {
+func (m *MessagesView) layoutHeaderLocked(gtx layout.Context, th *Theme) layout.Dimensions {
 	if m.header == "" {
 		return layout.Dimensions{Size: gtx.Constraints.Min}
 	}
@@ -743,7 +820,75 @@ func (m *MessagesView) layoutHeader(gtx layout.Context, th *Theme) layout.Dimens
 	})
 }
 
-func (m *MessagesView) layoutRow(gtx layout.Context, th *Theme, fmt *slack.Formatter, idx int, r *messageRow) layout.Dimensions {
+func dayChanged(ts1, ts2 string) bool {
+	t1, ok1 := slack.ParseTimestamp(ts1)
+	t2, ok2 := slack.ParseTimestamp(ts2)
+	if !ok1 || !ok2 {
+		return false
+	}
+	y1, m1, d1 := t1.Date()
+	y2, m2, d2 := t2.Date()
+	return y1 != y2 || m1 != m2 || d1 != d2
+}
+
+func (m *MessagesView) layoutDayDivider(gtx layout.Context, th *Theme, ts string) layout.Dimensions {
+	return layout.Inset{
+		Top:    unit.Dp(16),
+		Bottom: unit.Dp(8),
+		Left:   unit.Dp(16),
+		Right:  unit.Dp(16),
+	}.Layout(gtx, func(gtx layout.Context) layout.Dimensions {
+		return layout.Flex{Alignment: layout.Middle}.Layout(gtx,
+			layout.Flexed(1, func(gtx layout.Context) layout.Dimensions {
+				sz := image.Point{X: gtx.Constraints.Max.X, Y: gtx.Dp(unit.Dp(1))}
+				drawRect(gtx, th.Pal.Border, sz)
+				return layout.Dimensions{Size: sz}
+			}),
+			layout.Rigid(func(gtx layout.Context) layout.Dimensions {
+				return layout.Inset{Left: unit.Dp(8), Right: unit.Dp(8)}.Layout(gtx, func(gtx layout.Context) layout.Dimensions {
+					t, ok := slack.ParseTimestamp(ts)
+					if !ok {
+						return layout.Dimensions{}
+					}
+
+					var dateStr string
+					now := time.Now()
+					y, m, d := t.Date()
+					ny, nm, nd := now.Date()
+
+					if y == ny && m == nm && d == nd {
+						dateStr = "Today"
+					} else {
+						yesterday := now.AddDate(0, 0, -1)
+						yy, ym, yd := yesterday.Date()
+						if y == yy && m == ym && d == yd {
+							dateStr = "Yesterday"
+						} else {
+							dateStr = t.Format("Monday, January 2")
+							if y != ny {
+								dateStr = t.Format("Monday, January 2, 2006")
+							}
+						}
+					}
+
+					lbl := material.Caption(th.Mat, dateStr)
+					lbl.Color = th.Pal.TextMuted
+					lbl.Font.Weight = font.Bold
+					th.applyFont(&lbl, FontStyle{})
+					return lbl.Layout(gtx)
+				})
+			}),
+			layout.Flexed(1, func(gtx layout.Context) layout.Dimensions {
+				sz := image.Point{X: gtx.Constraints.Max.X, Y: gtx.Dp(unit.Dp(1))}
+				drawRect(gtx, th.Pal.Border, sz)
+				return layout.Dimensions{Size: sz}
+			}),
+		)
+	})
+}
+
+func (m *MessagesView) layoutRowLocked(gtx layout.Context, th *Theme, fmt *slack.Formatter, idx int, rows []*messageRow) layout.Dimensions {
+	r := rows[idx]
 	selected := m.selected
 	if m.threadActive {
 		selected = m.threadSelected
@@ -753,153 +898,174 @@ func (m *MessagesView) layoutRow(gtx layout.Context, th *Theme, fmt *slack.Forma
 	if isSelected {
 		bg = th.Pal.BgRowAlt
 	}
+	showDivider := idx == 0
+	if idx > 0 {
+		showDivider = dayChanged(rows[idx-1].msg.Timestamp, r.msg.Timestamp)
+	}
+
 	row := func(gtx layout.Context) layout.Dimensions {
 		return paintedBg(gtx, bg, func(gtx layout.Context) layout.Dimensions {
 			return layout.Inset{
-		Top:    unit.Dp(8),
-		Bottom: unit.Dp(8),
-		Left:   unit.Dp(16),
-		Right:  unit.Dp(16),
-	}.Layout(gtx, func(gtx layout.Context) layout.Dimensions {
-		return layout.Flex{Axis: layout.Horizontal, Alignment: layout.Start}.Layout(gtx,
-			// Left column: Avatar
-			layout.Rigid(func(gtx layout.Context) layout.Dimensions {
-				var op paint.ImageOp
-				var hasOp bool
-				u := fmt.GetUser(r.msg.UserID)
-				if u != nil && u.ImageURL != "" {
-					op, hasOp, _ = m.images.GetOp(u.ImageURL)
-				}
-				return layout.Flex{Axis: layout.Horizontal}.Layout(gtx,
+				Top:    unit.Dp(8),
+				Bottom: unit.Dp(8),
+				Left:   unit.Dp(16),
+				Right:  unit.Dp(16),
+			}.Layout(gtx, func(gtx layout.Context) layout.Dimensions {
+				return layout.Flex{Axis: layout.Horizontal, Alignment: layout.Start}.Layout(gtx,
+					// Left column: Avatar
 					layout.Rigid(func(gtx layout.Context) layout.Dimensions {
-						if !hasOp {
-							return layout.Spacer{Width: unit.Dp(36), Height: unit.Dp(36)}.Layout(gtx)
+						var op paint.ImageOp
+						var hasOp bool
+						u := fmt.GetUser(r.msg.UserID)
+						if u != nil && u.ImageURL != "" {
+							op, hasOp, _ = m.images.GetOp(u.ImageURL)
 						}
-						gtx.Constraints.Max.X = gtx.Dp(unit.Dp(36))
-						gtx.Constraints.Max.Y = gtx.Dp(unit.Dp(36))
-						gtx.Constraints.Min = gtx.Constraints.Max
-						w := widget.Image{
-							Src:      op,
-							Fit:      widget.Cover,
-							Position: layout.Center,
-						}
-						return w.Layout(gtx)
+						return layout.Flex{Axis: layout.Horizontal}.Layout(gtx,
+							layout.Rigid(func(gtx layout.Context) layout.Dimensions {
+								if !hasOp {
+									return layout.Spacer{Width: unit.Dp(36), Height: unit.Dp(36)}.Layout(gtx)
+								}
+								gtx.Constraints.Max.X = gtx.Dp(unit.Dp(36))
+								gtx.Constraints.Max.Y = gtx.Dp(unit.Dp(36))
+								gtx.Constraints.Min = gtx.Constraints.Max
+								w := widget.Image{
+									Src:      op,
+									Fit:      widget.Cover,
+									Position: layout.Center,
+								}
+								return w.Layout(gtx)
+							}),
+							layout.Rigid(layout.Spacer{Width: unit.Dp(12)}.Layout),
+						)
 					}),
-					layout.Rigid(layout.Spacer{Width: unit.Dp(12)}.Layout),
-				)
-			}),
-			// Right column: Content
-			layout.Flexed(1, func(gtx layout.Context) layout.Dimensions {
-				return layout.Flex{Axis: layout.Vertical}.Layout(gtx,
-					// Header line: username + time
-					layout.Rigid(func(gtx layout.Context) layout.Dimensions {
-						return layout.Flex{Alignment: layout.Middle}.Layout(gtx,
+					// Right column: Content
+					layout.Flexed(1, func(gtx layout.Context) layout.Dimensions {
+						return layout.Flex{Axis: layout.Vertical}.Layout(gtx,
+							// Header line: username + time
 							layout.Rigid(func(gtx layout.Context) layout.Dimensions {
-								name := r.msg.Username
-								if name == "" {
-									name = r.msg.UserID
-								}
-								var presence string
-								if u := fmt.GetUser(r.msg.UserID); u != nil {
-									presence = u.Presence
-								}
+								return layout.Flex{Alignment: layout.Middle}.Layout(gtx,
+									layout.Rigid(func(gtx layout.Context) layout.Dimensions {
+										name := r.msg.Username
+										if name == "" {
+											name = r.msg.UserID
+										}
+										var presence string
+										if u := fmt.GetUser(r.msg.UserID); u != nil {
+											presence = u.Presence
+										}
 
-								return layout.Flex{Alignment: layout.Middle}.Layout(gtx,
-									layout.Rigid(func(gtx layout.Context) layout.Dimensions {
-										if presence == "" {
-											return layout.Dimensions{}
-										}
-										dot := "○ "
-										col := th.Pal.PresenceAway
-										if presence == "active" {
-											dot = "● "
-											col = th.Pal.PresenceActive
-										}
-										lbl := material.Body1(th.Mat, dot)
-										lbl.Color = col
-										th.applyFont(&lbl, th.Fonts.Messages)
-										return lbl.Layout(gtx)
+										return layout.Flex{Alignment: layout.Middle}.Layout(gtx,
+											layout.Rigid(func(gtx layout.Context) layout.Dimensions {
+												if presence == "" {
+													return layout.Dimensions{}
+												}
+												dot := "○ "
+												col := th.Pal.PresenceAway
+												if presence == "active" {
+													dot = "● "
+													col = th.Pal.PresenceActive
+												}
+												lbl := material.Body1(th.Mat, dot)
+												lbl.Color = col
+												th.applyFont(&lbl, th.Fonts.Messages)
+												return lbl.Layout(gtx)
+											}),
+											layout.Rigid(func(gtx layout.Context) layout.Dimensions {
+												lbl := material.Body1(th.Mat, name)
+												lbl.Font.Weight = font.SemiBold
+												lbl.Color = th.Pal.TextStrong
+												th.applyFont(&lbl, th.Fonts.Messages)
+												return lbl.Layout(gtx)
+											}),
+										)
 									}),
-									layout.Rigid(func(gtx layout.Context) layout.Dimensions {
-										lbl := material.Body1(th.Mat, name)
-										lbl.Font.Weight = font.SemiBold
-										lbl.Color = th.Pal.TextStrong
-										th.applyFont(&lbl, th.Fonts.Messages)
-										return lbl.Layout(gtx)
-									}),
-								)
-							}),
-							layout.Rigid(layout.Spacer{Width: unit.Dp(8)}.Layout),
-							layout.Rigid(func(gtx layout.Context) layout.Dimensions {
-								lbl := material.Caption(th.Mat, fmt.FormatTimestamp(r.msg.Timestamp))
-								lbl.Color = th.Pal.TextMuted
-								th.applyFont(&lbl, th.Fonts.Messages)
-								return lbl.Layout(gtx)
-							}),
-							layout.Rigid(func(gtx layout.Context) layout.Dimensions {
-								if r.msg.ChannelName == "" {
-									return layout.Dimensions{}
-								}
-								return layout.Flex{Alignment: layout.Middle}.Layout(gtx,
 									layout.Rigid(layout.Spacer{Width: unit.Dp(8)}.Layout),
 									layout.Rigid(func(gtx layout.Context) layout.Dimensions {
-										lbl := material.Caption(th.Mat, "#"+r.msg.ChannelName)
+										lbl := material.Caption(th.Mat, fmt.FormatTimestamp(r.msg.Timestamp))
 										lbl.Color = th.Pal.TextMuted
-										lbl.Font.Style = font.Italic
 										th.applyFont(&lbl, th.Fonts.Messages)
 										return lbl.Layout(gtx)
 									}),
+									layout.Rigid(func(gtx layout.Context) layout.Dimensions {
+										if r.msg.ChannelName == "" {
+											return layout.Dimensions{}
+										}
+										return layout.Flex{Alignment: layout.Middle}.Layout(gtx,
+											layout.Rigid(layout.Spacer{Width: unit.Dp(8)}.Layout),
+											layout.Rigid(func(gtx layout.Context) layout.Dimensions {
+												lbl := material.Caption(th.Mat, "#"+r.msg.ChannelName)
+												lbl.Color = th.Pal.TextMuted
+												lbl.Font.Style = font.Italic
+												th.applyFont(&lbl, th.Fonts.Messages)
+												return lbl.Layout(gtx)
+											}),
+										)
+									}),
 								)
+							}),
+							// Body: styled richtext
+							layout.Rigid(func(gtx layout.Context) layout.Dimensions {
+								return m.layoutBody(gtx, th, fmt, r)
+							}),
+							// Inline image previews
+							layout.Rigid(func(gtx layout.Context) layout.Dimensions {
+								return m.layoutFiles(gtx, th, r.msg.Files)
+							}),
+							// Reactions row (compact)
+							layout.Rigid(func(gtx layout.Context) layout.Dimensions {
+								if len(r.msg.Reactions) == 0 {
+									return layout.Dimensions{}
+								}
+								return layout.Inset{Top: unit.Dp(2)}.Layout(gtx, func(gtx layout.Context) layout.Dimensions {
+									return m.layoutReactions(gtx, th, fmt, r.msg.Reactions)
+								})
+							}),
+							// Thread indicator (only on the channel-history view; inside a
+							// thread every row is by definition part of one).
+							layout.Rigid(func(gtx layout.Context) layout.Dimensions {
+								if m.threadActive || r.msg.ReplyCount <= 0 {
+									return layout.Dimensions{}
+								}
+								return m.layoutThreadBadge(gtx, th, fmt, &r.msg)
+							}),
+							// Deletion pending prompt
+							layout.Rigid(func(gtx layout.Context) layout.Dimensions {
+								if m.deletePendingTS == r.msg.Timestamp {
+									return layout.Inset{Top: unit.Dp(4)}.Layout(gtx, func(gtx layout.Context) layout.Dimensions {
+										lbl := material.Body2(th.Mat, "Press 'd' or 'Enter' again to delete...")
+										lbl.Color = th.Pal.Firing
+										lbl.Font.Weight = font.SemiBold
+										return lbl.Layout(gtx)
+									})
+								}
+								return layout.Dimensions{}
 							}),
 						)
 					}),
-					// Body: styled richtext
-					layout.Rigid(func(gtx layout.Context) layout.Dimensions {
-						return m.layoutBody(gtx, th, fmt, r)
-					}),
-					// Inline image previews
-					layout.Rigid(func(gtx layout.Context) layout.Dimensions {
-						return m.layoutFiles(gtx, th, r.msg.Files)
-					}),
-					// Reactions row (compact)
-					layout.Rigid(func(gtx layout.Context) layout.Dimensions {
-						if len(r.msg.Reactions) == 0 {
-							return layout.Dimensions{}
-						}
-						return layout.Inset{Top: unit.Dp(2)}.Layout(gtx, func(gtx layout.Context) layout.Dimensions {
-							return m.layoutReactions(gtx, th, fmt, r.msg.Reactions)
-						})
-					}),
-					// Thread indicator (only on the channel-history view; inside a
-					// thread every row is by definition part of one).
-					layout.Rigid(func(gtx layout.Context) layout.Dimensions {
-						if m.threadActive || r.msg.ReplyCount <= 0 {
-							return layout.Dimensions{}
-						}
-						return m.layoutThreadBadge(gtx, th, fmt, &r.msg)
-					}),
-					// Deletion pending prompt
-					layout.Rigid(func(gtx layout.Context) layout.Dimensions {
-						if m.deletePendingTS == r.msg.Timestamp {
-							return layout.Inset{Top: unit.Dp(4)}.Layout(gtx, func(gtx layout.Context) layout.Dimensions {
-								lbl := material.Body2(th.Mat, "Press 'd' or 'Enter' again to delete...")
-								lbl.Color = th.Pal.Firing
-								lbl.Font.Weight = font.SemiBold
-								return lbl.Layout(gtx)
-							})
-						}
-						return layout.Dimensions{}
-					}),
 				)
-			}),
-		)
-	})
-	})
+			})
+		})
 	}
+
+	var out layout.Widget
 	if isSelected {
-		return withBorder(gtx, th.Pal.Accent, borders{Left: true}, row)
+		out = func(gtx layout.Context) layout.Dimensions {
+			return withBorder(gtx, th.Pal.Accent, borders{Left: true}, row)
+		}
+	} else {
+		out = row
 	}
-	return row(gtx)
+
+	if !showDivider {
+		return out(gtx)
+	}
+
+	return layout.Flex{Axis: layout.Vertical}.Layout(gtx,
+		layout.Rigid(func(gtx layout.Context) layout.Dimensions {
+			return m.layoutDayDivider(gtx, th, r.msg.Timestamp)
+		}),
+		layout.Rigid(out),
+	)
 }
 
 func (m *MessagesView) layoutBody(gtx layout.Context, th *Theme, fm *slack.Formatter, r *messageRow) layout.Dimensions {

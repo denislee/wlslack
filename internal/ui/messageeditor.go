@@ -186,6 +186,8 @@ func (e *MessageEditor) KeyFilters() []event.Filter {
 		key.Filter{Focus: t, Name: key.NameDownArrow},
 		key.Filter{Focus: t, Name: key.NameHome},
 		key.Filter{Focus: t, Name: key.NameEnd},
+		key.Filter{Focus: t, Name: key.NameLeftArrow, Required: key.ModCtrl},
+		key.Filter{Focus: t, Name: key.NameRightArrow, Required: key.ModCtrl},
 		key.Filter{Focus: t, Name: "A", Required: key.ModCtrl},
 		key.Filter{Focus: t, Name: "E", Required: key.ModCtrl},
 	}
@@ -222,10 +224,18 @@ func (e *MessageEditor) HandleKey(gtx layout.Context, ev key.Event) bool {
 		}
 		e.gPending = false
 	case "H", key.NameLeftArrow:
-		e.moveCaretRelative(-1)
+		if ev.Modifiers.Contain(key.ModCtrl) {
+			e.moveWord(-1)
+		} else {
+			e.moveCaretRelative(-1)
+		}
 		e.gPending = false
 	case "L", key.NameRightArrow:
-		e.moveCaretRelative(1)
+		if ev.Modifiers.Contain(key.ModCtrl) {
+			e.moveWord(1)
+		} else {
+			e.moveCaretRelative(1)
+		}
 		e.gPending = false
 	case "J", key.NameDownArrow:
 		e.moveLine(1)
@@ -303,44 +313,7 @@ func (e *MessageEditor) moveCaretRelative(delta int) {
 }
 
 func (e *MessageEditor) moveLine(dir int) {
-	rs := e.runes()
-	_, current := e.editor.Selection()
-	if current > len(rs) {
-		current = len(rs)
-	}
-
-	if dir > 0 {
-		for i := current; i < len(rs); i++ {
-			if rs[i] == '\n' {
-				e.moveCaret(i + 1)
-				return
-			}
-		}
-		e.moveCaret(len(rs))
-	} else {
-		if current == 0 {
-			return
-		}
-		lineStart := 0
-		for i := current - 1; i >= 0; i-- {
-			if rs[i] == '\n' {
-				lineStart = i + 1
-				break
-			}
-		}
-		if lineStart == 0 {
-			e.moveCaret(0)
-			return
-		}
-		prevLineStart := 0
-		for i := lineStart - 2; i >= 0; i-- {
-			if rs[i] == '\n' {
-				prevLineStart = i + 1
-				break
-			}
-		}
-		e.moveCaret(prevLineStart)
-	}
+	MoveLine(&e.editor, dir)
 }
 
 func (e *MessageEditor) moveWord(dir int) {

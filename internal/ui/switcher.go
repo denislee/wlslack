@@ -3,6 +3,7 @@ package ui
 import (
 	"image"
 	"strings"
+	"sync"
 	"time"
 
 	"gioui.org/font"
@@ -27,6 +28,8 @@ const (
 // and result list; the host (App) feeds it the full channel set and listens
 // for key events to drive selection / submit.
 type QuickSwitcher struct {
+	mu        sync.Mutex
+	dirty     bool
 	editor    widget.Editor
 	list      widget.List
 	all       []slack.Channel
@@ -54,28 +57,30 @@ func newQuickSwitcher(onSelect func(string, string), onSearch func(string)) *Qui
 
 // SetChannels stores the unfiltered channel set used as the search corpus.
 func (q *QuickSwitcher) SetChannels(channels []slack.Channel) {
+	q.mu.Lock()
 	q.all = channels
-	if q.tab == tabChannels {
-		q.refilter()
-	}
+	q.dirty = true
+	q.mu.Unlock()
 }
 
 // SetResults stores the message search results.
 func (q *QuickSwitcher) SetResults(results []slack.SearchResult) {
+	q.mu.Lock()
 	q.results = results
-	if q.tab == tabMessages {
-		q.refilter()
-	}
+	q.dirty = true
+	q.mu.Unlock()
 }
 
 // Reset clears the query and selection. Call when the switcher opens.
 func (q *QuickSwitcher) Reset() {
 	q.editor.SetText("")
+	q.mu.Lock()
 	q.lastQuery = ""
 	q.selected = 0
 	q.list.Position.First = 0
 	q.list.Position.Offset = 0
 	q.tab = tabChannels
+	q.mu.Unlock()
 	q.refilter()
 }
 
@@ -84,6 +89,7 @@ func (q *QuickSwitcher) Editor() *widget.Editor { return &q.editor }
 
 // ToggleTab switches between Channels and Messages search.
 func (q *QuickSwitcher) ToggleTab() {
+	q.mu.Lock()
 	if q.tab == tabChannels {
 		q.tab = tabMessages
 	} else {
@@ -92,6 +98,7 @@ func (q *QuickSwitcher) ToggleTab() {
 	q.selected = 0
 	q.list.Position.First = 0
 	q.list.Position.Offset = 0
+	q.mu.Unlock()
 	q.refilter()
 }
 
@@ -131,6 +138,11 @@ func (q *QuickSwitcher) MoveToStart() {
 	q.editor.SetCaret(0, 0)
 }
 
+func (q *QuickSwitcher) SelectAll() {
+	n := len([]rune(q.editor.Text()))
+	q.editor.SetCaret(0, n)
+}
+
 func (q *QuickSwitcher) MoveToEnd() {
 	n := len([]rune(q.editor.Text()))
 	q.editor.SetCaret(n, n)
@@ -149,12 +161,18 @@ func (q *QuickSwitcher) MoveCursor(delta int) {
 	q.editor.SetCaret(newPos, newPos)
 }
 
+func (q *QuickSwitcher) MoveWord(dir int) {
+	MoveWord(&q.editor, dir)
+}
+
 func (q *QuickSwitcher) Clear() {
 	q.editor.SetText("")
 }
 
 // MoveSelection shifts the highlighted row, scrolling to keep it in view.
 func (q *QuickSwitcher) MoveSelection(delta int) {
+	q.mu.Lock()
+	defer q.mu.Unlock()
 	if len(q.rows) == 0 {
 		return
 	}
@@ -183,6 +201,8 @@ func (q *QuickSwitcher) MoveSelection(delta int) {
 
 // Submit fires onSelect for the currently highlighted row, if any.
 func (q *QuickSwitcher) Submit() {
+	q.mu.Lock()
+	defer q.mu.Unlock()
 	if q.selected < 0 || q.selected >= len(q.rows) {
 		return
 	}
@@ -198,24 +218,33 @@ func (q *QuickSwitcher) Submit() {
 
 func (q *QuickSwitcher) refilter() {
 	query := strings.TrimSpace(strings.ToLower(q.editor.Text()))
+
+	q.mu.Lock()
 	changed := query != q.lastQuery
 	q.lastQuery = query
+	tab := q.tab
+	all := q.all
+	results := q.results
+	q.mu.Unlock()
 
-	if q.tab == tabMessages && changed && query != "" {
+	if tab == tabMessages && changed && query != "" {
 		if q.onSearch != nil {
 			q.onSearch(query)
 		}
 	}
 
+	q.mu.Lock()
+	defer q.mu.Unlock()
+
 	out := q.rows[:0]
 	if q.tab == tabChannels {
-		for _, ch := range q.all {
+		for _, ch := range all {
 			if query == "" || strings.Contains(strings.ToLower(ch.Name), query) {
 				out = append(out, &switcherRow{channel: ch})
 			}
 		}
 	} else {
-		for _, res := range q.results {
+		for _, res := range results {
 			out = append(out, &switcherRow{result: res})
 		}
 	}
@@ -237,16 +266,32 @@ func (q *QuickSwitcher) Layout(gtx layout.Context, th *Theme) layout.Dimensions 
 			break
 		}
 	}
-	if strings.TrimSpace(strings.ToLower(q.editor.Text())) != q.lastQuery {
+
+	q.mu.Lock()
+	dirty := q.dirty
+	q.dirty = false
+	lastQuery := q.lastQuery
+	q.mu.Unlock()
+
+	if dirty || strings.TrimSpace(strings.ToLower(q.editor.Text())) != lastQuery {
 		q.refilter()
 	}
 
+	q.mu.Lock()
+	var clickedRow int = -1
 	for i, r := range q.rows {
 		if r.click.Clicked(gtx) {
-			q.selected = i
-			q.Submit()
+			clickedRow = i
+			break
 		}
 	}
+	if clickedRow != -1 {
+		q.selected = clickedRow
+		q.mu.Unlock()
+		q.Submit()
+		q.mu.Lock()
+	}
+	defer q.mu.Unlock()
 
 	return paintedBg(gtx, th.Pal.Bg, func(gtx layout.Context) layout.Dimensions {
 		return layout.Inset{
@@ -288,7 +333,7 @@ func (q *QuickSwitcher) Layout(gtx layout.Context, th *Theme) layout.Dimensions 
 				}),
 				layout.Rigid(layout.Spacer{Height: unit.Dp(8)}.Layout),
 				layout.Flexed(1, func(gtx layout.Context) layout.Dimensions {
-					if len(q.rows) == 0 && q.tab == tabMessages && q.lastQuery != "" {
+					if len(q.rows) == 0 && q.tab == tabMessages && lastQuery != "" {
 						return layout.Center.Layout(gtx, func(gtx layout.Context) layout.Dimensions {
 							lbl := material.Body1(th.Mat, "No messages found.")
 							th.applyFont(&lbl, FontStyle{})
