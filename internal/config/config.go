@@ -30,13 +30,15 @@ type PollConfig struct {
 }
 
 type DisplayConfig struct {
-	TimestampFormat string
-	DateSeparator   bool
-	MessageLimit    int
-	ShowBotMessages bool
-	ShowStatusBar   bool
-	EmojiStyle      string
-	Theme           string
+	TimestampFormat    string
+	DateSeparator      bool
+	MessageLimit       int
+	ShowBotMessages    bool
+	ShowStatusBar      bool
+	EmojiStyle         string
+	Theme              string
+	DisableLinkUnfurl  bool
+	DisableMediaUnfurl bool
 }
 
 type ChannelConfig struct {
@@ -61,13 +63,15 @@ type filePollConfig struct {
 }
 
 type fileDisplay struct {
-	TimestampFormat string `toml:"timestamp_format"`
-	DateSeparator   *bool  `toml:"date_separator"`
-	MessageLimit    int    `toml:"message_limit"`
-	ShowBotMessages *bool  `toml:"show_bot_messages"`
-	ShowStatusBar   *bool  `toml:"show_status_bar"`
-	EmojiStyle      string `toml:"emoji_style"`
-	Theme           string `toml:"theme"`
+	TimestampFormat    string `toml:"timestamp_format"`
+	DateSeparator      *bool  `toml:"date_separator"`
+	MessageLimit       int    `toml:"message_limit"`
+	ShowBotMessages    *bool  `toml:"show_bot_messages"`
+	ShowStatusBar      *bool  `toml:"show_status_bar"`
+	EmojiStyle         string `toml:"emoji_style"`
+	Theme              string `toml:"theme"`
+	DisableLinkUnfurl  *bool  `toml:"disable_link_unfurl"`
+	DisableMediaUnfurl *bool  `toml:"disable_media_unfurl"`
 }
 
 type fileChannels struct {
@@ -87,13 +91,15 @@ func defaults() Config {
 			IdleMultiplier: 2,
 		},
 		Display: DisplayConfig{
-			TimestampFormat: "3:04 PM",
-			DateSeparator:   true,
-			MessageLimit:    50,
-			ShowBotMessages: true,
-			ShowStatusBar:   true,
-			EmojiStyle:      "unicode",
-			Theme:           "default",
+			TimestampFormat:    "3:04 PM",
+			DateSeparator:      true,
+			MessageLimit:       50,
+			ShowBotMessages:    true,
+			ShowStatusBar:      true,
+			EmojiStyle:         "unicode",
+			Theme:              "default",
+			DisableLinkUnfurl:  false,
+			DisableMediaUnfurl: false,
 		},
 		Channels: ChannelConfig{
 			Types: []string{"public_channel", "private_channel", "im", "mpim"},
@@ -184,6 +190,12 @@ func loadFromFile(cfg *Config, path string) {
 	}
 	if fc.Display.Theme != "" {
 		cfg.Display.Theme = fc.Display.Theme
+	}
+	if fc.Display.DisableLinkUnfurl != nil {
+		cfg.Display.DisableLinkUnfurl = *fc.Display.DisableLinkUnfurl
+	}
+	if fc.Display.DisableMediaUnfurl != nil {
+		cfg.Display.DisableMediaUnfurl = *fc.Display.DisableMediaUnfurl
 	}
 
 	if len(fc.Channels.Pinned) > 0 {

@@ -130,12 +130,19 @@ func Run(client *slack.Client, cfg *config.Config) error {
 	a.activeID.Store("")
 	images := slack.NewImageLoader(cfg.Token, cfg.Cookie, w.Invalidate)
 	a.channels = newChannelsSidebar(a.onChannelSelect)
-	state := config.LoadUIState()
+	state, stateLoaded := config.LoadUIState()
+	if !stateLoaded {
+		state.DisableLinkUnfurl = cfg.Display.DisableLinkUnfurl
+		state.DisableMediaUnfurl = cfg.Display.DisableMediaUnfurl
+	}
 	a.th.ApplyFontPrefs(prefsFromState(state.Fonts))
 	a.th.ApplyThemePrefs(state.ThemeSidebar, state.ThemeMain)
 	a.th.ShowOnlyRecentChannels = state.ShowOnlyRecentChannels
 	a.th.HideEmptyChannels = state.HideEmptyChannels
 	a.th.ShowStatusBar = state.ShowStatusBar
+	a.th.DisableLinkUnfurl = state.DisableLinkUnfurl
+	a.th.DisableMediaUnfurl = state.DisableMediaUnfurl
+	a.client.SetUnfurlSettings(a.th.DisableLinkUnfurl, a.th.DisableMediaUnfurl)
 	a.backgroundTasks = make(map[string]string)
 	a.channels.SetFavorites(state.Favorites, a.onFavoritesChanged)
 	a.channels.SetCollapsedGroups(state.CollapsedGroups, a.onCollapsedGroupsChanged)
@@ -523,6 +530,7 @@ func (a *App) handleKeys(gtx layout.Context) {
 		// j/k/h/l/i here. Without this, clicking a row would silently disable
 		// keyboard navigation.
 		filters = append(filters,
+			key.Filter{Name: "U", Required: key.ModCtrl},
 			key.Filter{Name: "J"},
 			key.Filter{Name: "K"},
 			key.Filter{Name: "I"},
@@ -871,6 +879,10 @@ func (a *App) handleKeys(gtx layout.Context) {
 			a.w.Invalidate()
 		case a.reactionPickerOpen && (kev.Name == key.NameReturn || (kev.Name == "Y" && kev.Modifiers.Contain(key.ModCtrl))):
 			a.reactionPicker.Submit()
+		case kev.Name == "U" && kev.Modifiers.Contain(key.ModCtrl):
+			if a.focusPane == paneMessages {
+				a.toggleSelectedPreview()
+			}
 		case kev.Name == "J":
 			switch {
 			case a.linkPickerOpen:
@@ -1277,6 +1289,38 @@ func (a *App) downloadAttachments(msg slack.Message) {
 	}
 }
 
+func (a *App) toggleSelectedPreview() {
+	msg, ts, ok := a.messages.SelectedMessage()
+	if !ok || msg.UserID != a.client.GetSelfID() {
+		return
+	}
+	chID := a.getActiveID()
+	if chID == "__UNREADS__" && msg.ChannelID != "" {
+		chID = msg.ChannelID
+	}
+	if chID == "" {
+		return
+	}
+
+	go func() {
+		// Update the message with its own text but respect current client settings
+		if err := a.client.UpdateMessage(chID, ts, msg.Text); err != nil {
+			slog.Error("UpdateMessage for preview toggle failed", "channel", chID, "ts", ts, "error", err)
+			return
+		}
+		if a.messages.InThread() {
+			tCh, tTS := a.messages.ThreadInfo()
+			if tCh == chID {
+				a.fetchThread(chID, tTS)
+			}
+		}
+		if a.getActiveID() == chID {
+			a.fetchMessages(chID)
+		}
+		a.w.Invalidate()
+	}()
+}
+
 func (a *App) deleteMessage(ch, ts string) {
 	go func() {
 		if err := a.client.DeleteMessage(ch, ts); err != nil {
@@ -1318,13 +1362,13 @@ func openURL(url string) {
 // this on every toggle; we merge into the existing UIState file so unrelated
 // state (read timestamps, etc.) stays intact.
 func (a *App) onFavoritesChanged(ids []string) {
-	state := config.LoadUIState()
+	state, _ := config.LoadUIState()
 	state.Favorites = ids
 	config.SaveUIState(state)
 }
 
 func (a *App) onCollapsedGroupsChanged(keys []string) {
-	state := config.LoadUIState()
+	state, _ := config.LoadUIState()
 	state.CollapsedGroups = keys
 	config.SaveUIState(state)
 }
@@ -1344,14 +1388,17 @@ func (a *App) closeSettings() {
 // we can redraw and persist immediately. Disk write is cheap; we do it inline
 // for simplicity.
 func (a *App) onFontsChanged() {
-	state := config.LoadUIState()
+	state, _ := config.LoadUIState()
 	state.Fonts = stateFromTheme(a.th)
 	state.ThemeSidebar = a.th.ThemeSidebar
 	state.ThemeMain = a.th.ThemeMain
 	state.ShowOnlyRecentChannels = a.th.ShowOnlyRecentChannels
 	state.HideEmptyChannels = a.th.HideEmptyChannels
 	state.ShowStatusBar = a.th.ShowStatusBar
+	state.DisableLinkUnfurl = a.th.DisableLinkUnfurl
+	state.DisableMediaUnfurl = a.th.DisableMediaUnfurl
 	config.SaveUIState(state)
+	a.client.SetUnfurlSettings(a.th.DisableLinkUnfurl, a.th.DisableMediaUnfurl)
 	a.w.Invalidate()
 }
 
@@ -1543,7 +1590,12 @@ func (a *App) onSend(text string, attachments []Attachment) {
 		} else {
 			a.startTask("send", "Sending message")
 			defer a.endTask("send")
-			err := a.client.SendMessage(id, text)
+			var err error
+			if threadTS != "" {
+				err = a.client.SendThreadReply(id, threadTS, text)
+			} else {
+				err = a.client.SendMessage(id, text)
+			}
 			if err != nil {
 				slog.Error("send failed", "channel", id, "thread", threadTS, "error", err)
 				return

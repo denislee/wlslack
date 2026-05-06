@@ -1161,7 +1161,7 @@ func (m *MessagesView) layoutBody(gtx layout.Context, th *Theme, fm *slack.Forma
 // fall through as a small "name (mimetype)" caption so they're at least
 // discoverable; future work can extend this for other types.
 func (m *MessagesView) layoutFiles(gtx layout.Context, th *Theme, files []slack.File) layout.Dimensions {
-	if len(files) == 0 || m.images == nil {
+	if len(files) == 0 || m.images == nil || th.DisableMediaUnfurl {
 		return layout.Dimensions{}
 	}
 	const maxW, maxH = 200, 200 // dp; thumbnail-sized preview cap

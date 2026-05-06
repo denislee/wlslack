@@ -12,6 +12,8 @@ type UIState struct {
 	ShowOnlyRecentChannels bool              `json:"show_only_recent_channels"`
 	HideEmptyChannels      bool              `json:"hide_empty_channels"`
 	ShowStatusBar          bool              `json:"show_status_bar"`
+	DisableLinkUnfurl      bool              `json:"disable_link_unfurl"`
+	DisableMediaUnfurl     bool              `json:"disable_media_unfurl"`
 	Favorites              []string          `json:"favorites"`
 	CollapsedGroups        []string          `json:"collapsed_groups"`
 	ReadTimestamps         map[string]string `json:"read_timestamps"`
@@ -65,14 +67,14 @@ func statePath() string {
 	return filepath.Join(dir, "state.json")
 }
 
-func LoadUIState() UIState {
+func LoadUIState() (UIState, bool) {
 	state := DefaultUIState()
 	data, err := os.ReadFile(statePath())
 	if err != nil {
-		return state
+		return state, false
 	}
 	_ = json.Unmarshal(data, &state)
-	return state
+	return state, true
 }
 
 func SaveUIState(state UIState) {

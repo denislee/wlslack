@@ -27,6 +27,8 @@ type SettingsScreen struct {
 	toggleRecent  widget.Clickable
 	toggleHideEmpty widget.Clickable
 	toggleStatusBar widget.Clickable
+	toggleLinkUnfurl  widget.Clickable
+	toggleMediaUnfurl widget.Clickable
 }
 
 type settingsRow struct {
@@ -131,6 +133,14 @@ func (s *SettingsScreen) Layout(gtx layout.Context) layout.Dimensions {
 	}
 	if s.toggleStatusBar.Clicked(gtx) {
 		th.ShowStatusBar = !th.ShowStatusBar
+		dirty = true
+	}
+	if s.toggleLinkUnfurl.Clicked(gtx) {
+		th.DisableLinkUnfurl = !th.DisableLinkUnfurl
+		dirty = true
+	}
+	if s.toggleMediaUnfurl.Clicked(gtx) {
+		th.DisableMediaUnfurl = !th.DisableMediaUnfurl
 		dirty = true
 	}
 
@@ -286,6 +296,44 @@ func (s *SettingsScreen) layoutThemeToggles(gtx layout.Context, th *Theme) layou
 						label = "on"
 					}
 					return s.button(gtx, th, &s.toggleStatusBar, label)
+				}),
+			)
+		}),
+		layout.Rigid(layout.Spacer{Height: unit.Dp(6)}.Layout),
+		layout.Rigid(func(gtx layout.Context) layout.Dimensions {
+			return layout.Flex{Alignment: layout.Middle}.Layout(gtx,
+				layout.Rigid(func(gtx layout.Context) layout.Dimensions {
+					lbl := material.Body2(th.Mat, "Disable Link Previews")
+					th.applyFont(&lbl, FontStyle{})
+					lbl.Color = th.Pal.TextDim
+					gtx.Constraints.Min.X = gtx.Dp(unit.Dp(160))
+					return lbl.Layout(gtx)
+				}),
+				layout.Rigid(func(gtx layout.Context) layout.Dimensions {
+					label := "off"
+					if th.DisableLinkUnfurl {
+						label = "on"
+					}
+					return s.button(gtx, th, &s.toggleLinkUnfurl, label)
+				}),
+			)
+		}),
+		layout.Rigid(layout.Spacer{Height: unit.Dp(6)}.Layout),
+		layout.Rigid(func(gtx layout.Context) layout.Dimensions {
+			return layout.Flex{Alignment: layout.Middle}.Layout(gtx,
+				layout.Rigid(func(gtx layout.Context) layout.Dimensions {
+					lbl := material.Body2(th.Mat, "Disable Media Previews")
+					th.applyFont(&lbl, FontStyle{})
+					lbl.Color = th.Pal.TextDim
+					gtx.Constraints.Min.X = gtx.Dp(unit.Dp(160))
+					return lbl.Layout(gtx)
+				}),
+				layout.Rigid(func(gtx layout.Context) layout.Dimensions {
+					label := "off"
+					if th.DisableMediaUnfurl {
+						label = "on"
+					}
+					return s.button(gtx, th, &s.toggleMediaUnfurl, label)
 				}),
 			)
 		}),

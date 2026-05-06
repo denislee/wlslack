@@ -160,6 +160,8 @@ type Theme struct {
 	ShowOnlyRecentChannels bool
 	HideEmptyChannels      bool
 	ShowStatusBar          bool
+	DisableLinkUnfurl      bool
+	DisableMediaUnfurl     bool
 }
 
 func newTheme() *Theme {

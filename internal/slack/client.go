@@ -195,6 +195,9 @@ type Client struct {
 	selfID string
 	token  string
 	cookie string
+
+	disableLinkUnfurl  bool
+	disableMediaUnfurl bool
 }
 
 func NewClient(token, cookie string) (*Client, error) {
@@ -219,6 +222,11 @@ func NewClient(token, cookie string) (*Client, error) {
 		return "", false
 	}
 	return c, nil
+}
+
+func (c *Client) SetUnfurlSettings(links, media bool) {
+	c.disableLinkUnfurl = links
+	c.disableMediaUnfurl = media
 }
 
 func (c *Client) AuthTest() (string, error) {
@@ -704,9 +712,19 @@ func (c *Client) ResolveMentions(messages []Message) {
 
 func (c *Client) SendMessage(channelID, text string) error {
 	text = MarkdownToMrkdwn(text)
+	var opts []slackapi.MsgOption
+	opts = append(opts, slackapi.MsgOptionText(text, false))
+	if c.disableLinkUnfurl {
+		opts = append(opts, slackapi.MsgOptionDisableLinkUnfurl())
+	} else {
+		opts = append(opts, slackapi.MsgOptionEnableLinkUnfurl())
+	}
+	if c.disableMediaUnfurl {
+		opts = append(opts, slackapi.MsgOptionDisableMediaUnfurl())
+	}
 	_, _, err := c.api.PostMessage(
 		channelID,
-		slackapi.MsgOptionText(text, false),
+		opts...,
 	)
 	if err != nil {
 		return fmt.Errorf("send message: %w", friendlyError(err))
@@ -716,10 +734,20 @@ func (c *Client) SendMessage(channelID, text string) error {
 
 func (c *Client) UpdateMessage(channelID, timestamp, text string) error {
 	text = MarkdownToMrkdwn(text)
+	var opts []slackapi.MsgOption
+	opts = append(opts, slackapi.MsgOptionText(text, false))
+	if c.disableLinkUnfurl {
+		opts = append(opts, slackapi.MsgOptionDisableLinkUnfurl())
+	} else {
+		opts = append(opts, slackapi.MsgOptionEnableLinkUnfurl())
+	}
+	if c.disableMediaUnfurl {
+		opts = append(opts, slackapi.MsgOptionDisableMediaUnfurl())
+	}
 	_, _, _, err := c.api.UpdateMessage(
 		channelID,
 		timestamp,
-		slackapi.MsgOptionText(text, false),
+		opts...,
 	)
 	if err != nil {
 		return fmt.Errorf("update message: %w", friendlyError(err))
@@ -737,11 +765,22 @@ func (c *Client) DeleteMessage(channelID, timestamp string) error {
 
 func (c *Client) SendThreadReply(channelID, threadTS, text string) error {
 	text = MarkdownToMrkdwn(text)
-	_, _, err := c.api.PostMessage(
-		channelID,
+	var opts []slackapi.MsgOption
+	opts = append(opts,
 		slackapi.MsgOptionText(text, false),
 		slackapi.MsgOptionTS(threadTS),
-		slackapi.MsgOptionDisableLinkUnfurl(),
+	)
+	if c.disableLinkUnfurl {
+		opts = append(opts, slackapi.MsgOptionDisableLinkUnfurl())
+	} else {
+		opts = append(opts, slackapi.MsgOptionEnableLinkUnfurl())
+	}
+	if c.disableMediaUnfurl {
+		opts = append(opts, slackapi.MsgOptionDisableMediaUnfurl())
+	}
+	_, _, err := c.api.PostMessage(
+		channelID,
+		opts...,
 	)
 	if err != nil {
 		return fmt.Errorf("send reply: %w", friendlyError(err))
@@ -1157,6 +1196,9 @@ func (c *Client) convertMessage(msg slackapi.Message) Message {
 	}
 
 	for _, a := range msg.Attachments {
+		if c.disableLinkUnfurl && (a.FromURL != "" || a.OriginalURL != "") {
+			continue
+		}
 		if a.ImageURL != "" {
 			files = append(files, File{
 				Name:     a.Title,
@@ -1210,7 +1252,7 @@ func (c *Client) convertMessage(msg slackapi.Message) Message {
 	}
 
 	// Detect raw GIF URLs in text and treat them as images if no other files exist.
-	if len(files) == 0 && text != "" {
+	if !c.disableMediaUnfurl && len(files) == 0 && text != "" {
 		urls := ExtractURLs(text)
 		if len(urls) == 1 {
 			u := urls[0]
@@ -1424,6 +1466,9 @@ func lookupChannelName(id string) (string, bool) {
 func (c *Client) extractAttachmentText(attachments []slackapi.Attachment) string {
 	var parts []string
 	for _, a := range attachments {
+		if c.disableLinkUnfurl && (a.FromURL != "" || a.OriginalURL != "") {
+			continue
+		}
 		var lines []string
 		if a.Pretext != "" {
 			lines = append(lines, a.Pretext)
