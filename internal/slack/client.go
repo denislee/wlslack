@@ -1,6 +1,7 @@
 package slack
 
 import (
+	"bytes"
 	"errors"
 	"fmt"
 	"io"
@@ -71,11 +72,29 @@ func (c *Client) GetEmoji() (map[string]string, error) {
 }
 
 func (c *Client) MergeMessages(a, b []Message) []Message {
+	if len(b) == 0 {
+		return a
+	}
+
+	// Determine the time range covered by the new messages.
+	minTS, maxTS := b[0].Timestamp, b[0].Timestamp
+	for _, msg := range b {
+		if msg.Timestamp < minTS {
+			minTS = msg.Timestamp
+		}
+		if msg.Timestamp > maxTS {
+			maxTS = msg.Timestamp
+		}
+	}
+
 	m := make(map[string]Message, len(a)+len(b))
 	for _, msg := range a {
 		m[msg.Timestamp] = msg
 	}
+
+	newIDs := make(map[string]bool, len(b))
 	for _, msg := range b {
+		newIDs[msg.Timestamp] = true
 		existing, ok := m[msg.Timestamp]
 		if ok {
 			msg.EditHistory = mergeHistory(existing.EditHistory, msg.EditHistory)
@@ -94,8 +113,24 @@ func (c *Client) MergeMessages(a, b []Message) []Message {
 			} else if existing.Text == msg.Text && existing.EditHistory != nil && msg.EditHistory == nil {
 				msg.EditHistory = existing.EditHistory
 			}
+			// Preserve deleted status if the API somehow returned an old message
+			// (unlikely, but safe).
+			if existing.Deleted && !msg.Deleted {
+				// If it's in the new set, it's NOT deleted anymore (maybe an "undelete" or API fluke).
+				// We'll trust the new set's lack of Deleted flag, but we already have Deleted=false by default on new messages.
+			}
 		}
 		m[msg.Timestamp] = msg
+	}
+
+	// Any message in the cache (a) that falls within the timestamp range of
+	// the new messages (b) but is NOT present in the new set is considered
+	// deleted.
+	for ts, msg := range m {
+		if ts >= minTS && ts <= maxTS && !newIDs[ts] && !msg.Deleted {
+			msg.Deleted = true
+			m[ts] = msg
+		}
 	}
 
 	merged := make([]Message, 0, len(m))
@@ -520,10 +555,13 @@ func (c *Client) GetMessages(channelID string, limit int, oldest string) ([]Mess
 		messages[i], messages[j] = messages[j], messages[i]
 	}
 
-	c.cache.SetMessages(channelID, messages)
-	_ = c.cache.SaveMessagesToDisk(channelID, messages)
-	go c.ResolveMentions(messages)
-	return messages, nil
+	cached := c.cache.GetMessages(channelID)
+	merged := c.MergeMessages(cached, messages)
+
+	c.cache.SetMessages(channelID, merged)
+	_ = c.cache.SaveMessagesToDisk(channelID, merged)
+	go c.ResolveMentions(merged)
+	return merged, nil
 }
 
 func (c *Client) GetMessagesContext(channelID string, limit int, ts string) ([]Message, error) {
@@ -568,10 +606,13 @@ func (c *Client) GetMessagesContext(channelID string, limit int, ts string) ([]M
 		messages[i], messages[j] = messages[j], messages[i]
 	}
 
-	c.cache.SetMessages(channelID, messages)
-	_ = c.cache.SaveMessagesToDisk(channelID, messages)
-	go c.ResolveMentions(messages)
-	return messages, nil
+	cached := c.cache.GetMessages(channelID)
+	merged := c.MergeMessages(cached, messages)
+
+	c.cache.SetMessages(channelID, merged)
+	_ = c.cache.SaveMessagesToDisk(channelID, merged)
+	go c.ResolveMentions(merged)
+	return merged, nil
 }
 
 func (c *Client) GetThreadReplies(channelID, threadTS string) ([]Message, error) {
@@ -588,10 +629,13 @@ func (c *Client) GetThreadReplies(channelID, threadTS string) ([]Message, error)
 		replies = append(replies, c.convertMessage(msg))
 	}
 
-	c.cache.SetThread(channelID, threadTS, replies)
-	_ = c.cache.SaveThreadMessagesToDisk(channelID, threadTS, replies)
-	go c.ResolveMentions(replies)
-	return replies, nil
+	cached := c.cache.GetThread(channelID, threadTS)
+	merged := c.MergeMessages(cached, replies)
+
+	c.cache.SetThread(channelID, threadTS, merged)
+	_ = c.cache.SaveThreadMessagesToDisk(channelID, threadTS, merged)
+	go c.ResolveMentions(merged)
+	return merged, nil
 }
 
 // ResolveMentions scans messages for user and group IDs that aren't in the
@@ -703,6 +747,42 @@ func (c *Client) SendThreadReply(channelID, threadTS, text string) error {
 		return fmt.Errorf("send reply: %w", friendlyError(err))
 	}
 	return nil
+}
+
+func (c *Client) UploadFile(channelID, threadTS, filename string, data []byte, initialComment string, onProgress func(float32)) error {
+	params := slackapi.UploadFileParameters{
+		Channel:         channelID,
+		ThreadTimestamp: threadTS,
+		Filename:        filename,
+		FileSize:        len(data),
+		Reader: &progressReader{
+			r:     bytes.NewReader(data),
+			total: int64(len(data)),
+			cb:    onProgress,
+		},
+		InitialComment: initialComment,
+	}
+	_, err := c.api.UploadFile(params)
+	if err != nil {
+		return fmt.Errorf("upload file: %w", friendlyError(err))
+	}
+	return nil
+}
+
+type progressReader struct {
+	r     io.Reader
+	total int64
+	read  int64
+	cb    func(float32)
+}
+
+func (pr *progressReader) Read(p []byte) (n int, err error) {
+	n, err = pr.r.Read(p)
+	pr.read += int64(n)
+	if pr.total > 0 && pr.cb != nil {
+		pr.cb(float32(pr.read) / float32(pr.total))
+	}
+	return n, err
 }
 
 func (c *Client) AddReaction(channelID, timestamp, emoji string) error {

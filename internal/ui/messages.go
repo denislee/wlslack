@@ -359,10 +359,22 @@ func (m *MessagesView) OpenAuthor(fm *slack.Formatter) bool {
 	}
 	r := m.threadRows[m.threadSelected]
 	candidates := []authorField{{"User ID", r.msg.UserID}}
+
+	// Add edit history if present
+	for i, h := range r.msg.EditHistory {
+		label := "Original"
+		if i > 0 {
+			label = fmt.Sprintf("Edit %d", i)
+		}
+		candidates = append(candidates, authorField{
+			Label: label + " (" + fm.FormatTimestamp(h.Timestamp) + ")",
+			Value: h.Text,
+		})
+	}
+
 	avatar, displayName := "", r.msg.Username
 	if u := fm.GetUser(r.msg.UserID); u != nil {
-		candidates = []authorField{
-			{"User ID", u.ID},
+		candidates = append(candidates, []authorField{
 			{"Username", u.Name},
 			{"Display name", u.DisplayName},
 			{"Real name", u.RealName},
@@ -374,7 +386,7 @@ func (m *MessagesView) OpenAuthor(fm *slack.Formatter) bool {
 			{"Status emoji", u.StatusEmoji},
 			{"Status text", u.StatusText},
 			{"Image URL", u.ImageURL},
-		}
+		}...)
 		avatar = u.ImageURL
 		switch {
 		case u.DisplayName != "":
@@ -987,6 +999,26 @@ func (m *MessagesView) layoutRowLocked(gtx layout.Context, th *Theme, fmt *slack
 										return lbl.Layout(gtx)
 									}),
 									layout.Rigid(func(gtx layout.Context) layout.Dimensions {
+										if !r.msg.Edited && !r.msg.Deleted {
+											return layout.Dimensions{}
+										}
+										text := ""
+										color := th.Pal.TextMuted
+										if r.msg.Deleted {
+											text = " [DELETED]"
+											color = th.Pal.Firing
+										} else if r.msg.Edited {
+											text = " (edited)"
+										}
+										return layout.Inset{Left: unit.Dp(4)}.Layout(gtx, func(gtx layout.Context) layout.Dimensions {
+											lbl := material.Caption(th.Mat, text)
+											lbl.Color = color
+											lbl.Font.Style = font.Italic
+											th.applyFont(&lbl, th.Fonts.Messages)
+											return lbl.Layout(gtx)
+										})
+									}),
+									layout.Rigid(func(gtx layout.Context) layout.Dimensions {
 										if r.msg.ChannelName == "" {
 											return layout.Dimensions{}
 										}
@@ -1099,7 +1131,14 @@ func (m *MessagesView) layoutBody(gtx layout.Context, th *Theme, fm *slack.Forma
 		children = append(children, layout.Rigid(func(gtx layout.Context) layout.Dimensions {
 			styles := make([]richtext.SpanStyle, 0, len(c.spans))
 			for _, s := range c.spans {
-				styles = append(styles, toRichSpan(s, th))
+				span := toRichSpan(s, th)
+				if r.msg.Deleted {
+					span.Color = th.Pal.TextMuted
+					// Gio doesn't have strikethrough in richtext.SpanStyle yet,
+					// but we can dim it even more.
+					span.Color.A = 0x80
+				}
+				styles = append(styles, span)
 			}
 			w := richtext.Text(&r.rich[i], th.Mat.Shaper, styles...)
 			if c.isCodeBlock {

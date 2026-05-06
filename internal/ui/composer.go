@@ -1,12 +1,19 @@
 package ui
 
 import (
+	"bytes"
+	"image"
+	_ "image/gif"
+	_ "image/jpeg"
+	_ "image/png"
+	"image/color"
 	"strings"
 	"sync"
 
 	"gioui.org/font"
 	"gioui.org/io/key"
 	"gioui.org/layout"
+	"gioui.org/op/paint"
 	"gioui.org/unit"
 	"gioui.org/widget"
 	"gioui.org/widget/material"
@@ -14,11 +21,20 @@ import (
 	"github.com/user/wlslack/internal/slack"
 )
 
+type Attachment struct {
+	Name  string
+	Data  []byte
+	Image image.Image
+}
+
 // Composer is the bottom input row. Plain Enter sends the message; Shift+Enter
 // inserts a newline (handled natively by the editor when Submit=true).
 type Composer struct {
-	editor        widget.Editor
-	mentionPicker *MentionPicker
+	editor             widget.Editor
+	mentionPicker      *MentionPicker
+	attachBtn          widget.Clickable
+	pendingAttachments []Attachment
+	removeBtns         []widget.Clickable
 
 	// history stores sent messages. historyIdx is the current position in
 	// history. -1 means we are at the end (the current draft).
@@ -48,7 +64,7 @@ func newComposer() *Composer {
 
 // Layout draws the composer. onSend is invoked with the (trimmed, non-empty)
 // text whenever the user presses Enter.
-func (c *Composer) Layout(gtx layout.Context, th *Theme, fm *slack.Formatter, placeholder string, onSend func(string)) layout.Dimensions {
+func (c *Composer) Layout(gtx layout.Context, th *Theme, fm *slack.Formatter, placeholder string, onSend func(string, []Attachment), onAttach func()) layout.Dimensions {
 	c.pendingMu.Lock()
 	if c.pendingSet {
 		c.editor.SetText(c.pendingResult)
@@ -57,6 +73,18 @@ func (c *Composer) Layout(gtx layout.Context, th *Theme, fm *slack.Formatter, pl
 	}
 	c.pendingMu.Unlock()
 
+	if c.attachBtn.Clicked(gtx) {
+		onAttach()
+	}
+
+	for i := 0; i < len(c.removeBtns); i++ {
+		if c.removeBtns[i].Clicked(gtx) {
+			c.pendingAttachments = append(c.pendingAttachments[:i], c.pendingAttachments[i+1:]...)
+			c.removeBtns = append(c.removeBtns[:i], c.removeBtns[i+1:]...)
+			i--
+		}
+	}
+
 	for {
 		ev, ok := c.editor.Update(gtx)
 		if !ok {
@@ -64,15 +92,18 @@ func (c *Composer) Layout(gtx layout.Context, th *Theme, fm *slack.Formatter, pl
 		}
 		if _, isSubmit := ev.(widget.SubmitEvent); isSubmit {
 			text := strings.TrimSpace(c.editor.Text())
-			if text != "" {
-				onSend(text)
-				c.history = append(c.history, text)
+			if text != "" || len(c.pendingAttachments) > 0 {
+				onSend(text, c.pendingAttachments)
+				if text != "" {
+					c.history = append(c.history, text)
+				}
 			}
 			c.editor.SetText("")
 			c.origText = ""
 			c.historyIdx = -1
 			c.currentDraft = ""
 			c.mentionPicker.Close()
+			c.ClearAttachments()
 		}
 	}
 
@@ -80,35 +111,105 @@ func (c *Composer) Layout(gtx layout.Context, th *Theme, fm *slack.Formatter, pl
 
 	return withBorder(gtx, th.Pal.Border, borders{Top: true}, func(gtx layout.Context) layout.Dimensions {
 		return paintedBg(gtx, th.Pal.BgComposer, func(gtx layout.Context) layout.Dimensions {
-			return layout.Stack{}.Layout(gtx,
-				layout.Stacked(func(gtx layout.Context) layout.Dimensions {
-					return layout.Inset{
-						Top:    unit.Dp(10),
-						Bottom: unit.Dp(10),
-						Left:   unit.Dp(16),
-						Right:  unit.Dp(16),
-					}.Layout(gtx, func(gtx layout.Context) layout.Dimensions {
-						ed := material.Editor(th.Mat, &c.editor, placeholder)
-						ed.Color = th.Pal.Text
-						ed.HintColor = th.Pal.TextMuted
-						ed.SelectionColor = WithAlpha(th.Pal.Selection, 0x66)
-						if th.Fonts.Composer.Face != "" {
-							ed.Font.Typeface = font.Typeface(th.Fonts.Composer.Face)
-						}
-						if th.Fonts.Composer.Size > 0 {
-							ed.TextSize = unit.Sp(th.Fonts.Composer.Size)
-						}
-						return ed.Layout(gtx)
-					})
-				}),
-				layout.Stacked(func(gtx layout.Context) layout.Dimensions {
-					if !c.mentionPicker.Active() {
+			return layout.Flex{Axis: layout.Vertical}.Layout(gtx,
+				layout.Rigid(func(gtx layout.Context) layout.Dimensions {
+					if len(c.pendingAttachments) == 0 {
 						return layout.Dimensions{}
 					}
-					// Draw picker above the composer
-					return layout.Inset{Bottom: unit.Dp(45)}.Layout(gtx, func(gtx layout.Context) layout.Dimensions {
-						return c.mentionPicker.Layout(gtx, th)
+					return layout.Inset{Top: unit.Dp(8), Left: unit.Dp(16), Right: unit.Dp(16)}.Layout(gtx, func(gtx layout.Context) layout.Dimensions {
+						return layout.Flex{}.Layout(gtx,
+							layout.Rigid(func(gtx layout.Context) layout.Dimensions {
+								list := layout.List{Axis: layout.Horizontal}
+								return list.Layout(gtx, len(c.pendingAttachments), func(gtx layout.Context, i int) layout.Dimensions {
+									return layout.Inset{Right: unit.Dp(8)}.Layout(gtx, func(gtx layout.Context) layout.Dimensions {
+										return withBorder(gtx, th.Pal.BorderStrong, borders{Top: true, Right: true, Bottom: true, Left: true}, func(gtx layout.Context) layout.Dimensions {
+											return layout.Inset{Left: unit.Dp(8), Right: unit.Dp(4), Top: unit.Dp(2), Bottom: unit.Dp(2)}.Layout(gtx, func(gtx layout.Context) layout.Dimensions {
+												return layout.Flex{Alignment: layout.Middle}.Layout(gtx,
+													layout.Rigid(func(gtx layout.Context) layout.Dimensions {
+														if c.pendingAttachments[i].Image == nil {
+															return layout.Dimensions{}
+														}
+														return layout.Inset{Right: unit.Dp(4)}.Layout(gtx, func(gtx layout.Context) layout.Dimensions {
+															gtx.Constraints.Max.Y = gtx.Dp(unit.Dp(64))
+															gtx.Constraints.Max.X = gtx.Dp(unit.Dp(64))
+															m := paint.NewImageOp(c.pendingAttachments[i].Image)
+															img := widget.Image{Src: m, Fit: widget.Contain}
+															return img.Layout(gtx)
+														})
+													}),
+													layout.Rigid(func(gtx layout.Context) layout.Dimensions {
+														lbl := material.Caption(th.Mat, c.pendingAttachments[i].Name)
+														lbl.Color = th.Pal.Text
+														return lbl.Layout(gtx)
+													}),
+													layout.Rigid(func(gtx layout.Context) layout.Dimensions {
+														btn := material.Button(th.Mat, &c.removeBtns[i], "×")
+														btn.Background = color.NRGBA{}
+														btn.Color = th.Pal.TextDim
+														btn.Inset = layout.UniformInset(unit.Dp(2))
+														btn.TextSize = unit.Sp(14)
+														return btn.Layout(gtx)
+													}),
+												)
+											})
+										})
+									})
+								})
+							}),
+						)
 					})
+				}),
+				layout.Rigid(func(gtx layout.Context) layout.Dimensions {
+					return layout.Stack{}.Layout(gtx,
+						layout.Stacked(func(gtx layout.Context) layout.Dimensions {
+							return layout.Flex{Alignment: layout.Middle}.Layout(gtx,
+								layout.Flexed(1, func(gtx layout.Context) layout.Dimensions {
+									return layout.Inset{
+										Top:    unit.Dp(10),
+										Bottom: unit.Dp(10),
+										Left:   unit.Dp(16),
+										Right:  unit.Dp(8),
+									}.Layout(gtx, func(gtx layout.Context) layout.Dimensions {
+										ed := material.Editor(th.Mat, &c.editor, placeholder)
+										ed.Color = th.Pal.Text
+										ed.HintColor = th.Pal.TextMuted
+										ed.SelectionColor = WithAlpha(th.Pal.Selection, 0x66)
+										if th.Fonts.Composer.Face != "" {
+											ed.Font.Typeface = font.Typeface(th.Fonts.Composer.Face)
+										}
+										if th.Fonts.Composer.Size > 0 {
+											ed.TextSize = unit.Sp(th.Fonts.Composer.Size)
+										}
+										return ed.Layout(gtx)
+									})
+								}),
+								layout.Rigid(func(gtx layout.Context) layout.Dimensions {
+									return layout.Inset{Right: unit.Dp(16)}.Layout(gtx, func(gtx layout.Context) layout.Dimensions {
+										btn := material.Button(th.Mat, &c.attachBtn, "+")
+										btn.Background = color.NRGBA{} // Transparent
+										btn.Color = th.Pal.TextDim
+										btn.Inset = layout.UniformInset(unit.Dp(8))
+										if c.attachBtn.Hovered() {
+											btn.Color = th.Pal.Accent
+										}
+										// Force a bit of size so it's clickable
+										gtx.Constraints.Min.X = gtx.Dp(unit.Dp(24))
+										gtx.Constraints.Min.Y = gtx.Dp(unit.Dp(24))
+										return btn.Layout(gtx)
+									})
+								}),
+							)
+						}),
+						layout.Stacked(func(gtx layout.Context) layout.Dimensions {
+							if !c.mentionPicker.Active() {
+								return layout.Dimensions{}
+							}
+							// Draw picker above the composer
+							return layout.Inset{Bottom: unit.Dp(45)}.Layout(gtx, func(gtx layout.Context) layout.Dimensions {
+								return c.mentionPicker.Layout(gtx, th)
+							})
+						}),
+					)
 				}),
 			)
 		})
@@ -233,6 +334,25 @@ func (c *Composer) MoveLine(dir int) {
 func (c *Composer) Clear() {
 	c.editor.SetText("")
 	c.origText = ""
+	c.ClearAttachments()
+}
+
+func (c *Composer) AddAttachment(name string, data []byte) {
+	img, _, _ := image.Decode(bytes.NewReader(data))
+	c.pendingAttachments = append(c.pendingAttachments, Attachment{Name: name, Data: data, Image: img})
+	c.removeBtns = append(c.removeBtns, widget.Clickable{})
+}
+
+func (c *Composer) ClearAttachments() {
+	c.pendingAttachments = nil
+	c.removeBtns = nil
+}
+
+func (c *Composer) SetPendingText(text string) {
+	c.pendingMu.Lock()
+	c.pendingResult = text
+	c.pendingSet = true
+	c.pendingMu.Unlock()
 }
 
 func (c *Composer) HistoryPrev() {

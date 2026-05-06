@@ -32,6 +32,7 @@ type Message struct {
 	Edited      bool
 	EditedTS    string
 	EditHistory []Edit
+	Deleted     bool
 	Files       []File
 	IsBot       bool
 }

@@ -18,6 +18,7 @@ import (
 	"gioui.org/io/clipboard"
 	"gioui.org/io/event"
 	"gioui.org/io/key"
+	"gioui.org/io/transfer"
 	"gioui.org/layout"
 	"gioui.org/op"
 	"gioui.org/unit"
@@ -63,7 +64,8 @@ type App struct {
 
 	// keyTag is the focus target for app-level shortcuts (j/k navigation).
 	// Bare struct{} is fine — we only use its address.
-	keyTag struct{}
+	keyTag           struct{}
+	composerPasteTag struct{}
 
 	// UI mode flags. Mutated from goroutines, read on the UI thread; the
 	// reads happen during Layout while writes trigger Invalidate, so a frame
@@ -102,6 +104,7 @@ type App struct {
 	composerWasFocused bool
 
 	backgroundTasks map[string]string // ID -> description
+	uploadProgress  atomic.Int32      // 0-100, -1 means no active upload
 
 	// Tracks if the last Up/Down press hit a boundary without moving.
 	atUpBoundary   bool
@@ -138,6 +141,7 @@ func Run(client *slack.Client, cfg *config.Config) error {
 	a.channels.SetCollapsedGroups(state.CollapsedGroups, a.onCollapsedGroupsChanged)
 	a.messages = newMessagesView(images)
 	a.composer = newComposer()
+	a.uploadProgress.Store(-1)
 	a.switcher = newQuickSwitcher(a.onSwitcherSelect, a.onSwitcherSearch)
 	a.linkPicker = newLinkPicker(a.onLinkPickerSelect)
 	a.imageViewer = newImageViewer(images)
@@ -274,20 +278,35 @@ func (a *App) layoutStatusBar(gtx layout.Context) layout.Dimensions {
 
 	return withBorder(gtx, a.th.Pal.Border, borders{Top: true}, func(gtx layout.Context) layout.Dimensions {
 		return paintedBg(gtx, a.th.Pal.BgSidebar, func(gtx layout.Context) layout.Dimensions {
-			return layout.Inset{
-				Top:    unit.Dp(2),
-				Bottom: unit.Dp(2),
-				Left:   unit.Dp(10),
-				Right:  unit.Dp(10),
-			}.Layout(gtx, func(gtx layout.Context) layout.Dimensions {
-				lbl := material.Caption(a.th.Mat, msg)
-				a.th.applyFont(&lbl, a.th.Fonts.StatusBar)
-				lbl.Color = a.th.Pal.TextDim
-				if len(tasks) > 0 {
-					lbl.Color = a.th.Pal.Accent
-				}
-				return lbl.Layout(gtx)
-			})
+			return layout.Flex{Axis: layout.Vertical}.Layout(gtx,
+				layout.Rigid(func(gtx layout.Context) layout.Dimensions {
+					p := a.uploadProgress.Load()
+					if p < 0 {
+						return layout.Dimensions{}
+					}
+					bar := material.ProgressBar(a.th.Mat, float32(p)/100)
+					bar.Color = a.th.Pal.Accent
+					bar.TrackColor = WithAlpha(a.th.Pal.Accent, 0x33)
+					gtx.Constraints.Min.Y = gtx.Dp(unit.Dp(2))
+					return bar.Layout(gtx)
+				}),
+				layout.Rigid(func(gtx layout.Context) layout.Dimensions {
+					return layout.Inset{
+						Top:    unit.Dp(2),
+						Bottom: unit.Dp(2),
+						Left:   unit.Dp(10),
+						Right:  unit.Dp(10),
+					}.Layout(gtx, func(gtx layout.Context) layout.Dimensions {
+						lbl := material.Caption(a.th.Mat, msg)
+						a.th.applyFont(&lbl, a.th.Fonts.StatusBar)
+						lbl.Color = a.th.Pal.TextDim
+						if len(tasks) > 0 {
+							lbl.Color = a.th.Pal.Accent
+						}
+						return lbl.Layout(gtx)
+					})
+				}),
+			)
 		})
 	})
 }
@@ -295,6 +314,7 @@ func (a *App) layoutStatusBar(gtx layout.Context) layout.Dimensions {
 func (a *App) layout(gtx layout.Context) layout.Dimensions {
 	a.applyPendingFocus(gtx)
 	a.handleKeys(gtx)
+	a.handleClipboardEvents(gtx)
 
 	return layout.Flex{Axis: layout.Vertical}.Layout(gtx,
 		layout.Flexed(1, func(gtx layout.Context) layout.Dimensions {
@@ -356,7 +376,7 @@ func (a *App) layout(gtx layout.Context) layout.Dimensions {
 								}
 							}
 							gtx.Constraints.Min.X = gtx.Constraints.Max.X
-							return a.composer.Layout(gtx, a.th, a.fmt, placeholder, a.onSend)
+							return a.composer.Layout(gtx, a.th, a.fmt, placeholder, a.onSend, a.onAttach)
 						}),
 					)
 				}),
@@ -478,6 +498,8 @@ func (a *App) handleKeys(gtx layout.Context) {
 			key.Filter{Focus: &a.composer.editor, Name: "F", Required: key.ModCtrl},
 			key.Filter{Focus: &a.composer.editor, Name: "B", Required: key.ModCtrl},
 			key.Filter{Focus: &a.composer.editor, Name: "C", Required: key.ModCtrl},
+			key.Filter{Focus: &a.composer.editor, Name: "V", Required: key.ModCtrl},
+			key.Filter{Focus: &a.composer.editor, Name: "v", Required: key.ModCtrl},
 			key.Filter{Focus: &a.composer.editor, Name: "P", Required: key.ModCtrl},
 			key.Filter{Focus: &a.composer.editor, Name: "N", Required: key.ModCtrl},
 			key.Filter{Focus: &a.composer.editor, Name: key.NameLeftArrow, Required: key.ModCtrl},
@@ -721,9 +743,14 @@ func (a *App) handleKeys(gtx layout.Context) {
 		case a.reactionPickerOpen && kev.Name == "B" && kev.Modifiers.Contain(key.ModCtrl):
 			a.reactionPicker.MoveCursor(-1)
 			a.w.Invalidate()
-		case a.reactionPickerOpen && kev.Name == "C" && kev.Modifiers.Contain(key.ModCtrl):
-			a.reactionPicker.Clear()
+		case composerFocused && kev.Name == "C" && kev.Modifiers.Contain(key.ModCtrl):
+			a.composer.Clear()
 			a.w.Invalidate()
+		case composerFocused && (kev.Name == "V" || kev.Name == "v") && kev.Modifiers.Contain(key.ModCtrl):
+			slog.Info("Ctrl+V detected", "tag", fmt.Sprintf("%p", &a.composerPasteTag))
+			if !a.tryWaylandPaste() {
+				gtx.Execute(clipboard.ReadCmd{Tag: &a.composerPasteTag})
+			}
 		case composerFocused && (kev.Name == "W" || kev.Name == key.NameDeleteBackward) && kev.Modifiers.Contain(key.ModCtrl):
 			a.composer.DeleteLastWord()
 			a.w.Invalidate()
@@ -1475,7 +1502,7 @@ func (a *App) onChannelSelectWithContext(id string, ts string) {
 	}
 }
 
-func (a *App) onSend(text string) {
+func (a *App) onSend(text string, attachments []Attachment) {
 	id := a.getActiveID()
 	if id == "" {
 		return
@@ -1487,19 +1514,42 @@ func (a *App) onSend(text string) {
 	if a.messages.InThread() {
 		_, threadTS = a.messages.ThreadInfo()
 	}
+
 	go func() {
-		a.startTask("send", "Sending message")
-		defer a.endTask("send")
-		var err error
-		if threadTS != "" {
-			err = a.client.SendThreadReply(id, threadTS, text)
+		if len(attachments) > 0 {
+			a.startTask("upload", fmt.Sprintf("Uploading %d files", len(attachments)))
+			a.uploadProgress.Store(0)
+			defer func() {
+				a.endTask("upload")
+				a.uploadProgress.Store(-1)
+			}()
+
+			for i, att := range attachments {
+				comment := ""
+				if i == 0 {
+					comment = text
+				}
+				err := a.client.UploadFile(id, threadTS, att.Name, att.Data, comment, func(p float32) {
+					// Overall progress: (i + p) / len(attachments)
+					overall := (float32(i) + p) / float32(len(attachments))
+					a.uploadProgress.Store(int32(overall * 100))
+					a.w.Invalidate()
+				})
+				if err != nil {
+					slog.Error("upload failed", "file", att.Name, "error", err)
+					// Continue with next? For now yes.
+				}
+			}
 		} else {
-			err = a.client.SendMessage(id, text)
+			a.startTask("send", "Sending message")
+			defer a.endTask("send")
+			err := a.client.SendMessage(id, text)
+			if err != nil {
+				slog.Error("send failed", "channel", id, "thread", threadTS, "error", err)
+				return
+			}
 		}
-		if err != nil {
-			slog.Error("send failed", "channel", id, "thread", threadTS, "error", err)
-			return
-		}
+
 		// Refetch to surface the message.
 		if threadTS != "" {
 			a.fetchThread(id, threadTS)
@@ -1871,4 +1921,164 @@ func (a *App) fetchAllUnreads() {
 		a.messages.SetMessages(all)
 		a.w.Invalidate()
 	}
+}
+
+func (a *App) handleClipboardEvents(gtx layout.Context) {
+	// Catch all types to log what's actually coming in
+	for {
+		ev, ok := gtx.Source.Event(transfer.TargetFilter{Target: &a.composerPasteTag})
+		if !ok {
+			break
+		}
+		slog.Info("clipboard event received", "type", fmt.Sprintf("%T", ev))
+		if dev, ok := ev.(transfer.DataEvent); ok {
+			slog.Info("clipboard data event", "mime", dev.Type)
+			r := dev.Open()
+			data, err := io.ReadAll(r)
+			r.Close()
+			if err != nil {
+				slog.Error("clipboard read failed", "type", dev.Type, "error", err)
+				continue
+			}
+			slog.Info("clipboard data read", "size", len(data))
+
+			if strings.HasPrefix(dev.Type, "image/") {
+				ext := "png"
+				if strings.Contains(dev.Type, "jpeg") {
+					ext = "jpg"
+				} else if strings.Contains(dev.Type, "gif") {
+					ext = "gif"
+				} else if strings.Contains(dev.Type, "bmp") {
+					ext = "bmp"
+				} else if strings.Contains(dev.Type, "tiff") {
+					ext = "tiff"
+				}
+				filename := fmt.Sprintf("pasted_image_%s.%s", time.Now().Format("20060102_150405"), ext)
+				a.composer.AddAttachment(filename, data)
+				a.w.Invalidate()
+				return
+			} else if dev.Type == "text/uri-list" {
+				lines := strings.Split(string(data), "\r\n")
+				for _, line := range lines {
+					line = strings.TrimSpace(line)
+					if line == "" || strings.HasPrefix(line, "#") {
+						continue
+					}
+					// file:///path/to/file
+					path := strings.TrimPrefix(line, "file://")
+					fileData, err := os.ReadFile(path)
+					if err != nil {
+						slog.Error("read pasted file failed", "path", path, "error", err)
+						continue
+					}
+					a.composer.AddAttachment(filepath.Base(path), fileData)
+				}
+				a.w.Invalidate()
+				return
+			} else if dev.Type == "text/plain" || dev.Type == "text/plain;charset=utf-8" || dev.Type == "UTF8_STRING" {
+				a.composer.editor.Insert(string(data))
+			}
+		}
+	}
+}
+
+func (a *App) onAttach() {
+	go func() {
+		const sep = "|||"
+		// Try zenity first
+		cmd := exec.Command("zenity", "--file-selection", "--multiple", "--separator="+sep, "--title=Select Files to Attach")
+		out, err := cmd.Output()
+		if err != nil {
+			// Fallback to kdialog
+			cmd = exec.Command("kdialog", "--getopenfilename", ".", "--multiple", "--separate-output")
+			out, err = cmd.Output()
+		}
+		if err != nil {
+			slog.Debug("file picker failed or cancelled", "error", err)
+			return
+		}
+
+		output := strings.TrimSpace(string(out))
+		if output == "" {
+			return
+		}
+
+		var paths []string
+		if strings.Contains(output, sep) {
+			paths = strings.Split(output, sep)
+		} else {
+			// kdialog --multiple --separate-output uses newlines
+			paths = strings.Split(output, "\n")
+		}
+
+		for _, path := range paths {
+			path = strings.TrimSpace(path)
+			if path == "" {
+				continue
+			}
+			data, err := os.ReadFile(path)
+			if err != nil {
+				slog.Error("read file failed", "path", path, "error", err)
+				continue
+			}
+
+			a.composer.AddAttachment(filepath.Base(path), data)
+		}
+		a.w.Invalidate()
+	}()
+}
+
+func (a *App) tryWaylandPaste() bool {
+	if os.Getenv("WAYLAND_DISPLAY") == "" {
+		return false
+	}
+
+	// Try wl-paste
+	cmd := exec.Command("wl-paste", "--list-types")
+	out, err := cmd.Output()
+	if err != nil {
+		return false
+	}
+
+	types := strings.Split(strings.TrimSpace(string(out)), "\n")
+	typeMap := make(map[string]bool)
+	for _, t := range types {
+		typeMap[t] = true
+	}
+
+	// Priority to images
+	imageTypes := []string{"image/png", "image/jpeg", "image/gif", "image/bmp", "image/tiff"}
+	for _, mime := range imageTypes {
+		if typeMap[mime] {
+			data, err := exec.Command("wl-paste", "--type", mime).Output()
+			if err == nil {
+				ext := "png"
+				if strings.Contains(mime, "jpeg") {
+					ext = "jpg"
+				} else if strings.Contains(mime, "gif") {
+					ext = "gif"
+				} else if strings.Contains(mime, "bmp") {
+					ext = "bmp"
+				} else if strings.Contains(mime, "tiff") {
+					ext = "tiff"
+				}
+				filename := fmt.Sprintf("pasted_image_%s.%s", time.Now().Format("20060102_150405"), ext)
+				a.composer.AddAttachment(filename, data)
+				a.w.Invalidate()
+				return true
+			}
+		}
+	}
+
+	// Fallback to text
+	if typeMap["text/plain"] || typeMap["UTF8_STRING"] {
+		data, err := exec.Command("wl-paste").Output()
+		if err == nil {
+			a.composer.editor.Insert(string(data))
+			a.w.Invalidate()
+			return true
+		}
+	}
+
+	return false
 }

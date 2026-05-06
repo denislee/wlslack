@@ -69,6 +69,7 @@ func initSchema(db *sql.DB) error {
 			edited INTEGER NOT NULL DEFAULT 0,
 			edited_ts TEXT,
 			edit_history TEXT,
+			deleted INTEGER NOT NULL DEFAULT 0,
 			files TEXT,
 			is_bot INTEGER NOT NULL DEFAULT 0,
 			PRIMARY KEY (channel_id, thread_ts, ts)
@@ -114,6 +115,7 @@ func initSchema(db *sql.DB) error {
 		`ALTER TABLE users ADD COLUMN status_emoji TEXT`,
 		`ALTER TABLE users ADD COLUMN status_text TEXT`,
 		`ALTER TABLE channels ADD COLUMN mention_count INTEGER NOT NULL DEFAULT 0`,
+		`ALTER TABLE messages ADD COLUMN deleted INTEGER NOT NULL DEFAULT 0`,
 	}
 	for _, m := range migrations {
 		if _, err := db.Exec(m); err != nil && !strings.Contains(err.Error(), "duplicate column") {
@@ -344,7 +346,7 @@ func (s *sqliteStore) updateChannelUnread(id string, unread, mention int, lastRe
 func (s *sqliteStore) loadMessages(channelID, threadTS string, since int64) ([]Message, error) {
 	rows, err := s.db.Query(`
 		SELECT ts, user_id, username, body, reply_count, reply_users, last_reply_ts,
-		       reactions, edited, edited_ts, edit_history, files, is_bot
+		       reactions, edited, edited_ts, edit_history, deleted, files, is_bot
 		FROM messages
 		WHERE channel_id = ? AND thread_ts = ? AND ts_unix >= ?
 		ORDER BY ts ASC`,
@@ -358,9 +360,9 @@ func (s *sqliteStore) loadMessages(channelID, threadTS string, since int64) ([]M
 	for rows.Next() {
 		var m Message
 		var userID, username, body, replyUsers, lastReply, reactions, editedTS, history, files sql.NullString
-		var edited, isBot int
+		var edited, deleted, isBot int
 		if err := rows.Scan(&m.Timestamp, &userID, &username, &body, &m.ReplyCount,
-			&replyUsers, &lastReply, &reactions, &edited, &editedTS, &history, &files, &isBot); err != nil {
+			&replyUsers, &lastReply, &reactions, &edited, &editedTS, &history, &deleted, &files, &isBot); err != nil {
 			return nil, err
 		}
 		m.UserID = userID.String
@@ -369,6 +371,7 @@ func (s *sqliteStore) loadMessages(channelID, threadTS string, since int64) ([]M
 		m.LastReplyTS = lastReply.String
 		m.Edited = edited != 0
 		m.EditedTS = editedTS.String
+		m.Deleted = deleted != 0
 		m.IsBot = isBot != 0
 		if threadTS != "" {
 			m.ThreadTS = threadTS
@@ -403,8 +406,8 @@ func (s *sqliteStore) saveMessages(channelID, threadTS string, msgs []Message) e
 	stmt, err := tx.Prepare(`
 		INSERT INTO messages (channel_id, thread_ts, ts, ts_unix, user_id, username,
 		                     body, reply_count, reply_users, last_reply_ts,
-		                     reactions, edited, edited_ts, edit_history, files, is_bot)
-		VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+		                     reactions, edited, edited_ts, edit_history, deleted, files, is_bot)
+		VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
 		ON CONFLICT(channel_id, thread_ts, ts) DO UPDATE SET
 			user_id=excluded.user_id,
 			username=excluded.username,
@@ -416,6 +419,7 @@ func (s *sqliteStore) saveMessages(channelID, threadTS string, msgs []Message) e
 			edited=excluded.edited,
 			edited_ts=excluded.edited_ts,
 			edit_history=excluded.edit_history,
+			deleted=excluded.deleted,
 			files=excluded.files,
 			is_bot=excluded.is_bot`)
 	if err != nil {
@@ -430,8 +434,8 @@ func (s *sqliteStore) saveMessages(channelID, threadTS string, msgs []Message) e
 		files, _ := json.Marshal(m.Files)
 		if _, err := stmt.Exec(channelID, threadTS, m.Timestamp, slackTSToUnix(m.Timestamp),
 			m.UserID, m.Username, m.Text, m.ReplyCount, string(replyUsers), m.LastReplyTS,
-			string(reactions), boolToInt(m.Edited), m.EditedTS, string(history), string(files),
-			boolToInt(m.IsBot)); err != nil {
+			string(reactions), boolToInt(m.Edited), m.EditedTS, string(history),
+			boolToInt(m.Deleted), string(files), boolToInt(m.IsBot)); err != nil {
 			return err
 		}
 	}
