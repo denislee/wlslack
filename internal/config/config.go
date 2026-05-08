@@ -84,7 +84,7 @@ func defaults() Config {
 	return Config{
 		Polling: PollConfig{
 			ActiveChannel:  3 * time.Second,
-			ChannelList:    5 * time.Minute,
+			ChannelList:    15 * time.Second,
 			Priority:       5 * time.Second,
 			Thread:         5 * time.Second,
 			Presence:       30 * time.Second,

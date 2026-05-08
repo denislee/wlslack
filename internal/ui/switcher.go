@@ -2,6 +2,7 @@ package ui
 
 import (
 	"image"
+	"sort"
 	"strings"
 	"sync"
 	"time"
@@ -238,10 +239,29 @@ func (q *QuickSwitcher) refilter() {
 
 	out := q.rows[:0]
 	if q.tab == tabChannels {
+		type scored struct {
+			row   *switcherRow
+			score int
+		}
+		scoredRows := make([]scored, 0, len(all))
 		for _, ch := range all {
-			if query == "" || strings.Contains(strings.ToLower(ch.Name), query) {
-				out = append(out, &switcherRow{channel: ch})
+			if query == "" {
+				scoredRows = append(scoredRows, scored{row: &switcherRow{channel: ch}})
+				continue
 			}
+			score, ok := fuzzyScore(query, strings.ToLower(ch.Name))
+			if !ok {
+				continue
+			}
+			scoredRows = append(scoredRows, scored{row: &switcherRow{channel: ch}, score: score})
+		}
+		if query != "" {
+			sort.SliceStable(scoredRows, func(i, j int) bool {
+				return scoredRows[i].score > scoredRows[j].score
+			})
+		}
+		for _, s := range scoredRows {
+			out = append(out, s.row)
 		}
 	} else {
 		for _, res := range results {
@@ -465,4 +485,54 @@ func (q *QuickSwitcher) layoutRow(gtx layout.Context, th *Theme, idx int, r *swi
 		}
 		return row(gtx)
 	})
+}
+
+// fuzzyScore returns a match score for query against target (both expected to
+// be lowercased). Both arguments are walked as runes so unicode names work.
+// Higher scores mean better matches; ok is false when query's characters
+// can't be found as an in-order subsequence of target.
+//
+// Bonuses: matching at the start of target, matching right after a separator
+// (space, '-', '_', '.', '/'), and consecutive matches. A length penalty
+// prefers tighter matches when scores would otherwise tie.
+func fuzzyScore(query, target string) (int, bool) {
+	if query == "" {
+		return 0, true
+	}
+	q := []rune(query)
+	t := []rune(target)
+	score := 0
+	qi := 0
+	prevMatch := -2
+	consecutive := 0
+	for ti := 0; ti < len(t) && qi < len(q); ti++ {
+		if q[qi] != t[ti] {
+			continue
+		}
+		score += 10
+		if prevMatch == ti-1 {
+			consecutive++
+			score += 15 * consecutive
+		} else {
+			consecutive = 0
+		}
+		if ti == 0 {
+			score += 35
+		} else {
+			switch t[ti-1] {
+			case ' ', '-', '_', '.', '/':
+				score += 30
+			}
+		}
+		if ti == qi {
+			score += 5
+		}
+		prevMatch = ti
+		qi++
+	}
+	if qi < len(q) {
+		return 0, false
+	}
+	score -= len(t) - len(q)
+	return score, true
 }

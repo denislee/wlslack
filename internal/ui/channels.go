@@ -73,6 +73,11 @@ type sidebarRow struct {
 	click      widget.Clickable
 	channel    slack.Channel
 	isFavorite bool
+
+	// Header rows only: aggregate unread / mention counts across the
+	// channels inside this group. Rendered as badges next to the title.
+	headerUnread  int
+	headerMention int
 }
 
 func newChannelsSidebar(onSelect func(id string)) *ChannelsSidebar {
@@ -330,11 +335,31 @@ func (s *ChannelsSidebar) ToggleCursorHeader() bool {
 }
 
 // SetChannels rebuilds the row list from the latest channel snapshot.
-func (s *ChannelsSidebar) SetChannels(channels []slack.Channel) {
+// Returns true if any visible property changed.
+func (s *ChannelsSidebar) SetChannels(channels []slack.Channel) bool {
 	s.mu.Lock()
 	defer s.mu.Unlock()
+
+	if len(s.raw) == len(channels) {
+		changed := false
+		for i := range s.raw {
+			if s.raw[i].ID != channels[i].ID ||
+				s.raw[i].UnreadCount != channels[i].UnreadCount ||
+				s.raw[i].MentionCount != channels[i].MentionCount ||
+				s.raw[i].LatestTS != channels[i].LatestTS ||
+				s.raw[i].Name != channels[i].Name {
+				changed = true
+				break
+			}
+		}
+		if !changed {
+			return false
+		}
+	}
+
 	s.raw = channels
 	s.dirty = true
+	return true
 }
 
 // rebuildRows splits channels into Favorites plus the four conversation-type
@@ -354,8 +379,7 @@ func (s *ChannelsSidebar) rebuildRowsLocked() {
 	// Unread aggregates channels with unread messages from all conversation
 	// types so the user can scan them in one place. A channel only ever lives
 	// in one group -- being unread takes priority over its category.
-	var unread, favs, channels, externals, dms, mpdms []slack.Channel
-	hasAnyUnread := false
+	var favs, channels, externals, dms, mpdms []slack.Channel
 	for _, ch := range s.raw {
 		isFav := s.favorites[ch.ID]
 		if s.hideEmpty && ch.LatestTSVerified && ch.LatestTS == "" && ch.UnreadCount == 0 && !isFav && !ch.IsIM && !ch.IsMPIM {
@@ -364,10 +388,6 @@ func (s *ChannelsSidebar) rebuildRowsLocked() {
 		}
 		if s.hideEmpty && !isFav && !ch.IsIM && !ch.IsMPIM {
 			slog.Debug("sidebar: keeping channel", "id", ch.ID, "name", ch.Name, "unread", ch.UnreadCount, "latest", ch.LatestTS, "verified", ch.LatestTSVerified)
-		}
-
-		if ch.MentionCount > 0 {
-			hasAnyUnread = true
 		}
 
 		switch {
@@ -397,11 +417,10 @@ func (s *ChannelsSidebar) rebuildRowsLocked() {
 			if hi != hj {
 				return hi
 			}
-			// Prioritize unread count (relevant for Favorites and category groups)
-			if (ci.UnreadCount > 0) != (cj.UnreadCount > 0) {
-				return ci.UnreadCount > 0
-			}
-			// Then sort by latest timestamp
+			// Most recent activity wins. Unread state is conveyed by the
+			// row's badge -- it does not influence position, so a channel
+			// with newer messages is always above an older one regardless
+			// of read state.
 			if ci.LatestTS != cj.LatestTS {
 				if ci.LatestTS == "" {
 					return false
@@ -411,18 +430,22 @@ func (s *ChannelsSidebar) rebuildRowsLocked() {
 				}
 				return ci.LatestTS > cj.LatestTS
 			}
-			return ci.Name < cj.Name
+			if ci.Name != cj.Name {
+				return ci.Name < cj.Name
+			}
+			return ci.ID < cj.ID
 		})
 	}
 
 	byActivity(favs)
-	if hasAnyUnread {
-		unread = []slack.Channel{{ID: "__UNREADS__", Name: "All Unreads"}}
+	// Home contains special aggregate views: Threads and Mentions.
+	var home []slack.Channel
+	totalMentions := 0
+	for _, ch := range s.raw {
+		totalMentions += ch.MentionCount
 	}
-	byActivity(channels)
-	byActivity(externals)
-	byActivity(dms)
-	byActivity(mpdms)
+	home = append(home, slack.Channel{ID: "__THREADS__", Name: "Threads"})
+	home = append(home, slack.Channel{ID: "__UNREADS__", Name: "Mentions", MentionCount: totalMentions})
 
 	groups := []struct {
 		header string
@@ -430,7 +453,7 @@ func (s *ChannelsSidebar) rebuildRowsLocked() {
 		fav    bool
 		limit  bool
 	}{
-		{"Unread", unread, false, false},
+		{"Home", home, false, false},
 		{"Favorites", favs, true, false},
 		{"Channels", channels, false, true},
 		{"External", externals, false, true},
@@ -452,14 +475,41 @@ func (s *ChannelsSidebar) rebuildRowsLocked() {
 		hr.header = g.header
 		hr.headerKey = g.header
 		hr.collapsed = collapsed
+		hr.headerUnread, hr.headerMention = aggregateGroupCounts(g.items)
 		rows = append(rows, hr)
-		if collapsed {
-			continue
-		}
 
 		items := g.items
-		if s.showOnlyRecent && g.limit && len(items) > 10 {
-			items = items[:10]
+		if collapsed {
+			// Even when the group is collapsed, surface channels with unread
+			// activity so the user doesn't lose track of them.
+			filtered := make([]slack.Channel, 0, len(items))
+			for _, ch := range items {
+				if ch.UnreadCount > 0 || ch.MentionCount > 0 {
+					filtered = append(filtered, ch)
+				}
+			}
+			if len(filtered) == 0 {
+				continue
+			}
+			items = filtered
+		} else {
+			if s.showOnlyRecent && g.limit && len(items) > 10 {
+				items = items[:10]
+			}
+
+			// Focus mode: when this group has any channel with unread activity,
+			// collapse the visible list down to just those channels (plus the
+			// active one so the user's current position never disappears).
+			// Skip Home — its rows are pseudo-aggregates that should always show.
+			if g.header != "Home" && groupHasActivity(items) {
+				filtered := make([]slack.Channel, 0, len(items))
+				for _, ch := range items {
+					if ch.UnreadCount > 0 || ch.MentionCount > 0 || ch.ID == s.activeID {
+						filtered = append(filtered, ch)
+					}
+				}
+				items = filtered
+			}
 		}
 
 		for _, ch := range items {
@@ -480,6 +530,41 @@ func (s *ChannelsSidebar) rebuildRowsLocked() {
 // so a click state is preserved across rebuilds without colliding with a
 // channel that happens to share the header text.
 func headerKey(h string) string { return "__hdr:" + h }
+
+// groupHasActivity reports whether any non-pseudo channel in items has
+// unreads or mentions. Used to decide whether to filter the group's visible
+// list down to just the active channels.
+func groupHasActivity(items []slack.Channel) bool {
+	for _, ch := range items {
+		if ch.ID == "__UNREADS__" || ch.ID == "__THREADS__" {
+			continue
+		}
+		if ch.UnreadCount > 0 || ch.MentionCount > 0 {
+			return true
+		}
+	}
+	return false
+}
+
+// aggregateGroupCounts mirrors the per-row badge logic so the totals shown on
+// a group header match what users see inside it. DMs/MPIMs treat every unread
+// as a mention, so their UnreadCount feeds the mention total instead of the
+// gray unread total. The Home pseudo-channels (__THREADS__, __UNREADS__) are
+// themselves aggregates, so they're excluded to avoid double counting.
+func aggregateGroupCounts(items []slack.Channel) (unread, mention int) {
+	for _, ch := range items {
+		if ch.ID == "__UNREADS__" || ch.ID == "__THREADS__" {
+			continue
+		}
+		if ch.IsIM || ch.IsMPIM {
+			mention += ch.UnreadCount
+			continue
+		}
+		unread += ch.UnreadCount
+		mention += ch.MentionCount
+	}
+	return
+}
 
 // Layout draws the sidebar.
 func (s *ChannelsSidebar) Layout(gtx layout.Context, th *Theme, fm *slack.Formatter) layout.Dimensions {
@@ -570,6 +655,13 @@ func (s *ChannelsSidebar) layoutHeader(gtx layout.Context, th *Theme, r *sidebar
 		bg = th.SidebarPal.BgRowAlt
 		textColor = th.SidebarPal.TextDim
 	}
+	headerSize := unit.Sp(11)
+	if th.Fonts.Channels.Size == 0 && th.Fonts.Global.Size == 0 {
+		headerSize = unit.Sp(11)
+	} else if th.Fonts.Channels.Size == 0 {
+		headerSize = unit.Sp(max(8, th.Fonts.Global.Size-2))
+	}
+
 	return r.click.Layout(gtx, func(gtx layout.Context) layout.Dimensions {
 		return paintedBg(gtx, bg, func(gtx layout.Context) layout.Dimensions {
 			return layout.Inset{
@@ -578,18 +670,49 @@ func (s *ChannelsSidebar) layoutHeader(gtx layout.Context, th *Theme, r *sidebar
 				Left:   unit.Dp(12),
 				Right:  unit.Dp(12),
 			}.Layout(gtx, func(gtx layout.Context) layout.Dimensions {
-				lbl := material.Caption(th.Mat, chevron+strings.ToUpper(r.header))
-				lbl.Color = textColor
-				lbl.Font.Weight = font.SemiBold
-				lbl.TextSize = unit.Sp(11)
-				th.applyFont(&lbl, th.Fonts.Channels)
-				// Re-apply the smaller size if not explicitly overridden in Channels section
-				if th.Fonts.Channels.Size == 0 && th.Fonts.Global.Size == 0 {
-					lbl.TextSize = unit.Sp(11)
-				} else if th.Fonts.Channels.Size == 0 {
-					lbl.TextSize = unit.Sp(max(8, th.Fonts.Global.Size-2))
-				}
-				return lbl.Layout(gtx)
+				return layout.Flex{Alignment: layout.Middle}.Layout(gtx,
+					layout.Flexed(1, func(gtx layout.Context) layout.Dimensions {
+						lbl := material.Caption(th.Mat, chevron+strings.ToUpper(r.header))
+						lbl.Color = textColor
+						lbl.Font.Weight = font.SemiBold
+						lbl.TextSize = headerSize
+						th.applyFont(&lbl, th.Fonts.Channels)
+						if th.Fonts.Channels.Size == 0 {
+							lbl.TextSize = headerSize
+						}
+						return lbl.Layout(gtx)
+					}),
+					layout.Rigid(func(gtx layout.Context) layout.Dimensions {
+						if r.headerUnread <= 0 {
+							return layout.Dimensions{}
+						}
+						lbl := material.Caption(th.Mat, fmt.Sprintf("%d", r.headerUnread))
+						lbl.Color = th.SidebarPal.UnreadBadge
+						lbl.Font.Weight = font.SemiBold
+						lbl.TextSize = headerSize
+						th.applyFont(&lbl, th.Fonts.Channels)
+						if th.Fonts.Channels.Size == 0 {
+							lbl.TextSize = headerSize
+						}
+						return lbl.Layout(gtx)
+					}),
+					layout.Rigid(func(gtx layout.Context) layout.Dimensions {
+						if r.headerMention <= 0 {
+							return layout.Dimensions{}
+						}
+						return layout.Inset{Left: unit.Dp(4)}.Layout(gtx, func(gtx layout.Context) layout.Dimensions {
+							lbl := material.Caption(th.Mat, fmt.Sprintf("%d", r.headerMention))
+							lbl.Color = th.SidebarPal.MentionBadge
+							lbl.Font.Weight = font.Bold
+							lbl.TextSize = headerSize
+							th.applyFont(&lbl, th.Fonts.Channels)
+							if th.Fonts.Channels.Size == 0 {
+								lbl.TextSize = headerSize
+							}
+							return lbl.Layout(gtx)
+						})
+					}),
+				)
 			})
 		})
 	})
@@ -607,13 +730,13 @@ func (s *ChannelsSidebar) layoutRow(gtx layout.Context, th *Theme, fm *slack.For
 			hasMention = true
 		}
 	}
-	if r.channel.ID == "__UNREADS__" {
+	if r.channel.ID == "__UNREADS__" || r.channel.ID == "__THREADS__" {
 		hasUnread = true
 		hasMention = true
 	}
 
 	bg := th.SidebarPal.BgSidebar
-	textColor := th.SidebarPal.Text
+	textColor := th.SidebarPal.TextDim
 	leftBorder := borders{}
 	switch {
 	case active:
@@ -702,7 +825,7 @@ func (s *ChannelsSidebar) layoutRowInner(
 				}),
 				layout.Rigid(func(gtx layout.Context) layout.Dimensions {
 					// For DMs, we show everything as a mention (red), so hide the gray unread badge
-					if r.channel.ID == "__UNREADS__" || r.channel.UnreadCount <= 0 || r.channel.IsIM || r.channel.IsMPIM {
+					if r.channel.ID == "__UNREADS__" || r.channel.ID == "__THREADS__" || r.channel.UnreadCount <= 0 || r.channel.IsIM || r.channel.IsMPIM {
 						return layout.Dimensions{}
 					}
 					lbl := material.Caption(th.Mat, fmt.Sprintf("%d", r.channel.UnreadCount))
@@ -717,7 +840,7 @@ func (s *ChannelsSidebar) layoutRowInner(
 						count = r.channel.UnreadCount
 					}
 
-					if r.channel.ID == "__UNREADS__" || count <= 0 {
+					if count <= 0 {
 						return layout.Dimensions{}
 					}
 					return layout.Inset{Left: unit.Dp(4)}.Layout(gtx, func(gtx layout.Context) layout.Dimensions {
@@ -734,6 +857,12 @@ func (s *ChannelsSidebar) layoutRowInner(
 }
 
 func channelPrefix(ch slack.Channel) string {
+	if ch.ID == "__THREADS__" {
+		return "= "
+	}
+	if ch.ID == "__UNREADS__" {
+		return "@ "
+	}
 	switch {
 	case ch.IsIM:
 		return "@ "

@@ -189,9 +189,11 @@ func (c *Cache) SetUser(user *User) {
 	c.mu.Unlock()
 
 	if c.store != nil {
-		if err := c.store.saveUsers([]User{*user}); err != nil {
-			slog.Debug("persist user failed", "user", user.ID, "error", err)
-		}
+		go func() {
+			if err := c.store.saveUsers([]User{*user}); err != nil {
+				slog.Debug("persist user failed", "user", user.ID, "error", err)
+			}
+		}()
 	}
 }
 
@@ -209,6 +211,20 @@ func (c *Cache) SetChannels(channels []Channel) {
 				newCh.UnreadCount = existing.UnreadCount
 				newCh.LastReadTS = existing.LastReadTS
 			}
+			// MentionCount is set by the mention scan, not the channel
+			// list payload. Preserve it across SetChannels writes
+			// (GetChannels, ResolveConversationNames) so the sidebar
+			// doesn't briefly drop the mention badge each refresh —
+			// but only while the channel still has unreads. Once
+			// unreads clear (e.g. read in another Slack client), the
+			// mentions are gone too; preserving here would leave a
+			// stale badge that points at an empty Mentions view.
+			if newCh.MentionCount == 0 && existing.MentionCount > 0 && newCh.UnreadCount > 0 {
+				newCh.MentionCount = existing.MentionCount
+			}
+		}
+		if newCh.UnreadCount == 0 {
+			newCh.MentionCount = 0
 		}
 		c.channels[id] = &newCh
 	}
@@ -229,6 +245,9 @@ func (c *Cache) SetChannelUnread(id string, unreadCount, mentionCount int, lastR
 	}
 	updated := *existing
 	updated.UnreadCount = unreadCount
+	if unreadCount == 0 {
+		mentionCount = 0
+	}
 	updated.MentionCount = mentionCount
 	updated.LastReadTS = lastReadTS
 	if latestTS != "" {
@@ -274,7 +293,10 @@ func (c *Cache) GetAllChannels() []Channel {
 			}
 			return channels[i].LatestTS > channels[j].LatestTS
 		}
-		return channels[i].Name < channels[j].Name
+		if channels[i].Name != channels[j].Name {
+			return channels[i].Name < channels[j].Name
+		}
+		return channels[i].ID < channels[j].ID
 	})
 	return channels
 }

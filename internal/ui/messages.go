@@ -74,6 +74,8 @@ type messageRow struct {
 	msg     slack.Message
 	rich    []richtext.InteractiveText
 	arrival time.Time
+	spans   []slack.Span
+	spansOk bool
 }
 
 func newMessagesView(images *slack.ImageLoader) *MessagesView {
@@ -277,7 +279,7 @@ func (m *MessagesView) OpenThread(channelID string) (string, string, bool) {
 		return "", "", false
 	}
 	r := m.rows[m.selected]
-	if channelID == "__UNREADS__" && r.msg.ChannelID != "" {
+	if (channelID == "__UNREADS__" || channelID == "__THREADS__") && r.msg.ChannelID != "" {
 		channelID = r.msg.ChannelID
 	}
 	ts := r.msg.ThreadTS
@@ -467,12 +469,31 @@ func (m *MessagesView) AuthorSelectedValue() (string, bool) {
 // SetThreadMessages replaces the thread row set. The slack API returns the
 // parent first followed by replies -- we render the whole sequence so the
 // reader sees the original message above the conversation.
-func (m *MessagesView) SetThreadMessages(msgs []slack.Message) {
+// Returns true if any message changed or new ones were added.
+func (m *MessagesView) SetThreadMessages(msgs []slack.Message) bool {
 	m.mu.Lock()
 	defer m.mu.Unlock()
 	if !m.threadActive {
-		return
+		return false
 	}
+
+	if len(m.threadRows) == len(msgs) {
+		changed := false
+		for i := range m.threadRows {
+			if m.threadRows[i].msg.Timestamp != msgs[i].Timestamp ||
+				m.threadRows[i].msg.Text != msgs[i].Text ||
+				len(m.threadRows[i].msg.Reactions) != len(msgs[i].Reactions) ||
+				m.threadRows[i].msg.Edited != msgs[i].Edited ||
+				m.threadRows[i].msg.ReplyCount != msgs[i].ReplyCount {
+				changed = true
+				break
+			}
+		}
+		if !changed {
+			return false
+		}
+	}
+
 	old := make(map[string]*messageRow, len(m.threadRows))
 	for _, r := range m.threadRows {
 		old[r.msg.Timestamp] = r
@@ -504,6 +525,7 @@ func (m *MessagesView) SetThreadMessages(msgs []slack.Message) {
 			}
 		}
 	}
+	return true
 }
 
 // MoveSelection shifts the selection by delta and scrolls the active list to
@@ -572,10 +594,28 @@ func (m *MessagesView) SetHeader(name, topic string) {
 }
 
 // SetMessages replaces the displayed messages, preserving rich-text state by
-// timestamp.
-func (m *MessagesView) SetMessages(msgs []slack.Message) {
+// timestamp. Returns true if any message changed or new ones were added.
+func (m *MessagesView) SetMessages(msgs []slack.Message) bool {
 	m.mu.Lock()
 	defer m.mu.Unlock()
+
+	if len(m.rows) == len(msgs) {
+		changed := false
+		for i := range m.rows {
+			if m.rows[i].msg.Timestamp != msgs[i].Timestamp ||
+				m.rows[i].msg.Text != msgs[i].Text ||
+				len(m.rows[i].msg.Reactions) != len(msgs[i].Reactions) ||
+				m.rows[i].msg.Edited != msgs[i].Edited ||
+				m.rows[i].msg.ReplyCount != msgs[i].ReplyCount {
+				changed = true
+				break
+			}
+		}
+		if !changed {
+			return false
+		}
+	}
+
 	old := make(map[string]*messageRow, len(m.rows))
 	for _, r := range m.rows {
 		old[r.msg.Timestamp] = r
@@ -596,6 +636,8 @@ func (m *MessagesView) SetMessages(msgs []slack.Message) {
 			if !wasEmpty {
 				r.arrival = time.Now()
 			}
+		} else if r.msg.Text != msg.Text {
+			r.spansOk = false
 		}
 		r.msg = msg
 		out = append(out, r)
@@ -632,6 +674,7 @@ func (m *MessagesView) SetMessages(msgs []slack.Message) {
 		}
 		m.pendFocusTS = ""
 	}
+	return true
 }
 
 // Layout draws the header bar plus the scrollable list. Switches between
@@ -1125,7 +1168,11 @@ func (m *MessagesView) layoutRowLocked(gtx layout.Context, th *Theme, fmt *slack
 }
 
 func (m *MessagesView) layoutBody(gtx layout.Context, th *Theme, fm *slack.Formatter, r *messageRow) layout.Dimensions {
-	spans := fm.FormatSpans(r.msg.Text)
+	if !r.spansOk {
+		r.spans = fm.FormatSpans(r.msg.Text)
+		r.spansOk = true
+	}
+	spans := r.spans
 	if len(spans) == 0 {
 		return layout.Dimensions{}
 	}

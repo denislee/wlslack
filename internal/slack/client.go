@@ -78,6 +78,7 @@ func (c *Client) MergeMessages(a, b []Message) []Message {
 
 	// Determine the time range covered by the new messages.
 	minTS, maxTS := b[0].Timestamp, b[0].Timestamp
+	bMap := make(map[string]bool, len(b))
 	for _, msg := range b {
 		if msg.Timestamp < minTS {
 			minTS = msg.Timestamp
@@ -85,18 +86,27 @@ func (c *Client) MergeMessages(a, b []Message) []Message {
 		if msg.Timestamp > maxTS {
 			maxTS = msg.Timestamp
 		}
+		bMap[msg.Timestamp] = true
 	}
 
-	m := make(map[string]Message, len(a)+len(b))
-	for _, msg := range a {
-		m[msg.Timestamp] = msg
-	}
+	merged := make([]Message, 0, len(a)+len(b))
+	i, j := 0, 0
 
-	newIDs := make(map[string]bool, len(b))
-	for _, msg := range b {
-		newIDs[msg.Timestamp] = true
-		existing, ok := m[msg.Timestamp]
-		if ok {
+	for i < len(a) && j < len(b) {
+		if a[i].Timestamp < b[j].Timestamp {
+			existing := a[i]
+			if existing.Timestamp >= minTS && existing.Timestamp <= maxTS && !existing.Deleted && !bMap[existing.Timestamp] {
+				existing.Deleted = true
+			}
+			merged = append(merged, existing)
+			i++
+		} else if a[i].Timestamp > b[j].Timestamp {
+			merged = append(merged, b[j])
+			j++
+		} else {
+			existing := a[i]
+			msg := b[j]
+
 			msg.EditHistory = mergeHistory(existing.EditHistory, msg.EditHistory)
 
 			if msg.Edited && msg.EditedTS != "" && existing.Text != msg.Text {
@@ -113,34 +123,26 @@ func (c *Client) MergeMessages(a, b []Message) []Message {
 			} else if existing.Text == msg.Text && existing.EditHistory != nil && msg.EditHistory == nil {
 				msg.EditHistory = existing.EditHistory
 			}
-			// Preserve deleted status if the API somehow returned an old message
-			// (unlikely, but safe).
-			if existing.Deleted && !msg.Deleted {
-				// If it's in the new set, it's NOT deleted anymore (maybe an "undelete" or API fluke).
-				// We'll trust the new set's lack of Deleted flag, but we already have Deleted=false by default on new messages.
-			}
-		}
-		m[msg.Timestamp] = msg
-	}
 
-	// Any message in the cache (a) that falls within the timestamp range of
-	// the new messages (b) but is NOT present in the new set is considered
-	// deleted.
-	for ts, msg := range m {
-		if ts >= minTS && ts <= maxTS && !newIDs[ts] && !msg.Deleted {
-			msg.Deleted = true
-			m[ts] = msg
+			merged = append(merged, msg)
+			i++
+			j++
 		}
 	}
 
-	merged := make([]Message, 0, len(m))
-	for _, msg := range m {
-		merged = append(merged, msg)
+	for i < len(a) {
+		existing := a[i]
+		if existing.Timestamp >= minTS && existing.Timestamp <= maxTS && !existing.Deleted && !bMap[existing.Timestamp] {
+			existing.Deleted = true
+		}
+		merged = append(merged, existing)
+		i++
 	}
 
-	sort.Slice(merged, func(i, j int) bool {
-		return merged[i].Timestamp < merged[j].Timestamp
-	})
+	for j < len(b) {
+		merged = append(merged, b[j])
+		j++
+	}
 
 	return merged
 }
@@ -303,6 +305,11 @@ func (c *Client) GetChannels(types []string, priorityIDs []string) ([]Channel, e
 	cursor := ""
 	page := 0
 
+	priorityMap := make(map[string]bool)
+	for _, id := range priorityIDs {
+		priorityMap[id] = true
+	}
+
 	for {
 		page++
 		params := &slackapi.GetConversationsParameters{
@@ -339,6 +346,7 @@ func (c *Client) GetChannels(types []string, priorityIDs []string) ([]Channel, e
 			}
 
 			// Pre-populate from cache so we have data for hideEmpty even if enrichment is skipped.
+			activityChanged := false
 			if cached := c.cache.GetChannel(ch.ID); cached != nil {
 				if (ch.IsMpIM || ch.IsIM) && cached.Name != "" && !strings.HasPrefix(cached.Name, "mpdm-") && !strings.HasPrefix(cached.Name, "U") {
 					cc.Name = cached.Name
@@ -352,9 +360,24 @@ func (c *Client) GetChannels(types []string, priorityIDs []string) ([]Channel, e
 			}
 
 			if ch.Latest != nil {
-				cc.LatestTS = ch.Latest.Timestamp
+				if ch.Latest.Timestamp > cc.LatestTS {
+					activityChanged = true
+					cc.LatestTS = ch.Latest.Timestamp
+				}
 				cc.LatestTSVerified = true
 			}
+
+			// Optimistic unread detection: if LatestTS > LastReadTS, we have unreads.
+			// This allows the UI to show activity immediately after the list fetch
+			// without waiting for the slow GetConversationInfo enrichment.
+			if cc.LatestTS != "" && cc.LastReadTS != "" && cc.LatestTS > cc.LastReadTS && cc.UnreadCount == 0 {
+				cc.UnreadCount = 1
+			}
+
+			if activityChanged {
+				priorityMap[cc.ID] = true
+			}
+
 			allChannels = append(allChannels, cc)
 		}
 
@@ -366,7 +389,14 @@ func (c *Client) GetChannels(types []string, priorityIDs []string) ([]Channel, e
 
 	slog.Info("GetChannels list fetched", "total", len(allChannels), "pages", page)
 
-	c.enrichWithUnreadCounts(allChannels, priorityIDs)
+	// Enrich only priority channels or those with newly discovered activity.
+	// This keeps us well within Tier 3 rate limits (50+ calls/min) even with
+	// frequent polling of the conversation list.
+	toEnrich := make([]string, 0)
+	for id := range priorityMap {
+		toEnrich = append(toEnrich, id)
+	}
+	c.enrichWithUnreadCounts(allChannels, toEnrich)
 
 	unreadCount := 0
 	for _, ch := range allChannels {
@@ -473,7 +503,7 @@ func (c *Client) GetUnreadCounts(ids []string) ([]Channel, error) {
 	c.enrichWithUnreadCounts(channels, ids)
 
 	for _, ch := range channels {
-		c.cache.SetChannelUnread(ch.ID, ch.UnreadCount, 0, ch.LastReadTS, ch.LatestTS)
+		c.cache.SetChannelUnread(ch.ID, ch.UnreadCount, ch.MentionCount, ch.LastReadTS, ch.LatestTS)
 	}
 
 	return channels, nil
@@ -490,7 +520,7 @@ func (c *Client) enrichWithUnreadCounts(channels []Channel, priorityIDs []string
 
 	for i := range channels {
 		isPriority := priorityMap[channels[i].ID] || channels[i].UnreadCount > 0
-		if len(channels) > 200 && !isPriority {
+		if !isPriority {
 			continue
 		}
 

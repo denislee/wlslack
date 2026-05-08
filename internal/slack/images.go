@@ -2,6 +2,7 @@ package slack
 
 import (
 	"bytes"
+	"container/list"
 	"crypto/sha256"
 	"encoding/hex"
 	"errors"
@@ -9,7 +10,6 @@ import (
 	"image"
 	"image/gif"
 	// Side-effect imports register decoders so image.Decode can detect format.
-	_ "image/gif"
 	_ "image/jpeg"
 	_ "image/png"
 	"io"
@@ -51,11 +51,13 @@ type ImageLoader struct {
 	sem      chan struct{}
 
 	mu       sync.Mutex
-	entries  map[string]*imageEntry
+	entries  map[string]*list.Element
+	lruList  *list.List
 	onChange func()
 }
 
 type imageEntry struct {
+	url    string
 	img    image.Image
 	gif    *gif.GIF
 	op     paint.ImageOp // built once on first read; reused across frames
@@ -104,8 +106,21 @@ func NewImageLoader(token, cookie string, onChange func()) *ImageLoader {
 		client:   hc,
 		cacheDir: filepath.Join(dir, "wlslack", "images"),
 		sem:      make(chan struct{}, maxConcurrentFetches),
-		entries:  make(map[string]*imageEntry),
+		entries:  make(map[string]*list.Element),
+		lruList:  list.New(),
 		onChange: onChange,
+	}
+}
+
+func (l *ImageLoader) evictOldest() {
+	const maxCachedImages = 100
+	for l.lruList.Len() > maxCachedImages {
+		back := l.lruList.Back()
+		if back != nil {
+			e := back.Value.(*imageEntry)
+			delete(l.entries, e.url)
+			l.lruList.Remove(back)
+		}
 	}
 }
 
@@ -117,12 +132,17 @@ func (l *ImageLoader) Get(url string) (image.Image, bool) {
 		return nil, true // treat as "nothing to load"
 	}
 	l.mu.Lock()
-	if e, ok := l.entries[url]; ok {
+	if el, ok := l.entries[url]; ok {
+		l.lruList.MoveToFront(el)
+		e := el.Value.(*imageEntry)
 		img, done := e.img, e.loaded
 		l.mu.Unlock()
 		return img, done
 	}
-	l.entries[url] = &imageEntry{}
+	e := &imageEntry{url: url}
+	el := l.lruList.PushFront(e)
+	l.entries[url] = el
+	l.evictOldest()
 	l.mu.Unlock()
 
 	go l.fetch(url)
@@ -140,12 +160,17 @@ func (l *ImageLoader) GetOp(url string) (paint.ImageOp, bool, bool) {
 	}
 	l.mu.Lock()
 	defer l.mu.Unlock()
-	e, ok := l.entries[url]
+	el, ok := l.entries[url]
 	if !ok {
-		l.entries[url] = &imageEntry{}
+		e := &imageEntry{url: url}
+		el = l.lruList.PushFront(e)
+		l.entries[url] = el
+		l.evictOldest()
 		go l.fetch(url)
 		return paint.ImageOp{}, false, false
 	}
+	l.lruList.MoveToFront(el)
+	e := el.Value.(*imageEntry)
 	if !e.loaded {
 		return paint.ImageOp{}, false, false
 	}
@@ -166,10 +191,15 @@ func (l *ImageLoader) GetGif(url string) (*gif.GIF, bool) {
 	}
 	l.mu.Lock()
 	defer l.mu.Unlock()
-	if e, ok := l.entries[url]; ok {
+	if el, ok := l.entries[url]; ok {
+		l.lruList.MoveToFront(el)
+		e := el.Value.(*imageEntry)
 		return e.gif, e.loaded
 	}
-	l.entries[url] = &imageEntry{}
+	e := &imageEntry{url: url}
+	el := l.lruList.PushFront(e)
+	l.entries[url] = el
+	l.evictOldest()
 	go l.fetch(url)
 	return nil, false
 }
@@ -177,11 +207,13 @@ func (l *ImageLoader) GetGif(url string) (*gif.GIF, bool) {
 func (l *ImageLoader) fetch(url string) {
 	img, g, err := l.load(url)
 	l.mu.Lock()
-	e := l.entries[url]
-	e.img = img
-	e.gif = g
-	e.err = err
-	e.loaded = true
+	if el, ok := l.entries[url]; ok {
+		e := el.Value.(*imageEntry)
+		e.img = img
+		e.gif = g
+		e.err = err
+		e.loaded = true
+	}
 	l.mu.Unlock()
 
 	if err != nil {

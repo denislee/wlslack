@@ -106,14 +106,20 @@ type App struct {
 	backgroundTasks map[string]string // ID -> description
 	uploadProgress  atomic.Int32      // 0-100, -1 means no active upload
 
-	// Tracks if the last Up/Down press hit a boundary without moving.
-	atUpBoundary   bool
-	atDownBoundary bool
-
 	editingTS string
 	editingCh string
 
 	pendingG bool
+
+	lastFullUnreadRefresh time.Time
+	lastPriorityRefresh   time.Time
+
+	// sidebarPublish coalesces sidebar updates so multiple concurrent
+	// cache mutations (priority tick, mention scans, active-channel poll)
+	// produce a single republish instead of flickering through intermediate
+	// orderings. Buffered with size 1 so signals are dropped while a
+	// publish is already pending.
+	sidebarPublish chan struct{}
 }
 
 // Run blocks running the GUI until the window is closed.
@@ -126,11 +132,12 @@ func Run(client *slack.Client, cfg *config.Config) error {
 	)
 
 	a := &App{
-		w:      w,
-		th:     newTheme(),
-		client: client,
-		cfg:    cfg,
-		fmt:    slack.NewFormatter(client.Cache(), cfg.Display.TimestampFormat),
+		w:              w,
+		th:             newTheme(),
+		client:         client,
+		cfg:            cfg,
+		fmt:            slack.NewFormatter(client.Cache(), cfg.Display.TimestampFormat),
+		sidebarPublish: make(chan struct{}, 1),
 	}
 	a.activeID.Store("")
 	images := slack.NewImageLoader(cfg.Token, cfg.Cookie, w.Invalidate)
@@ -167,6 +174,7 @@ func Run(client *slack.Client, cfg *config.Config) error {
 	go a.pollActiveChannel()
 	go a.pollEmojis()
 	go a.pollPresence()
+	go a.runSidebarPublisher()
 
 	return a.loop()
 }
@@ -502,35 +510,7 @@ func (a *App) handleKeys(gtx layout.Context) {
 		)
 	}
 	if composerFocused {
-		filters = append(filters,
-			key.Filter{Focus: &a.composer.editor, Name: key.NameEscape},
-			key.Filter{Focus: &a.composer.editor, Name: "[", Required: key.ModCtrl},
-			key.Filter{Focus: &a.composer.editor, Name: "W", Required: key.ModCtrl},
-			key.Filter{Focus: &a.composer.editor, Name: key.NameDeleteBackward, Required: key.ModCtrl},
-			key.Filter{Focus: &a.composer.editor, Name: "T", Required: key.ModCtrl},
-			key.Filter{Focus: &a.composer.editor, Name: "A", Required: key.ModCtrl},
-			key.Filter{Focus: &a.composer.editor, Name: "E", Required: key.ModCtrl},
-			key.Filter{Focus: &a.composer.editor, Name: "F", Required: key.ModCtrl},
-			key.Filter{Focus: &a.composer.editor, Name: "B", Required: key.ModCtrl},
-			key.Filter{Focus: &a.composer.editor, Name: "C", Required: key.ModCtrl},
-			key.Filter{Focus: &a.composer.editor, Name: "V", Required: key.ModCtrl},
-			key.Filter{Focus: &a.composer.editor, Name: "v", Required: key.ModCtrl},
-			key.Filter{Focus: &a.composer.editor, Name: "P", Required: key.ModCtrl},
-			key.Filter{Focus: &a.composer.editor, Name: "N", Required: key.ModCtrl},
-			key.Filter{Focus: &a.composer.editor, Name: key.NameLeftArrow, Required: key.ModCtrl},
-			key.Filter{Focus: &a.composer.editor, Name: key.NameRightArrow, Required: key.ModCtrl},
-			key.Filter{Focus: &a.composer.editor, Name: key.NameUpArrow},
-			key.Filter{Focus: &a.composer.editor, Name: key.NameDownArrow},
-		)
-		if a.composer.mentionPicker.Active() {
-			filters = append(filters,
-				key.Filter{Focus: &a.composer.editor, Name: key.NameUpArrow},
-				key.Filter{Focus: &a.composer.editor, Name: key.NameDownArrow},
-				key.Filter{Focus: &a.composer.editor, Name: key.NameReturn},
-				key.Filter{Focus: &a.composer.editor, Name: key.NameTab},
-				key.Filter{Focus: &a.composer.editor, Name: "Y", Required: key.ModCtrl},
-			)
-		}
+		filters = append(filters, a.composer.KeyFilters()...)
 	}
 	if !composerFocused && !switcherFocused && !reactionFocused && !messageEditorFocused && !a.messageEditorOpen {
 		// No Focus on these filters: any non-text-editing focus state (e.g. a
@@ -591,7 +571,7 @@ func (a *App) handleKeys(gtx layout.Context) {
 		a.pendingG = false
 
 		switch {
-		case kev.Name == "G":
+		case kev.Name == "G" && !composerFocused:
 			delta := 1000000
 			if !kev.Modifiers.Contain(key.ModShift) {
 				if wasPendingG {
@@ -636,10 +616,15 @@ func (a *App) handleKeys(gtx layout.Context) {
 					a.closeMessageEditor()
 				}
 			case composerFocused:
-				a.editingTS = ""
-				a.editingCh = ""
-				a.pendFocusKeyTag = true
-				a.w.Invalidate()
+				if a.composer.HandleKey(gtx, kev, a.onSend) {
+					a.w.Invalidate()
+				} else {
+					// HandleKey returns false in Normal mode for Esc, so we exit focus.
+					a.editingTS = ""
+					a.editingCh = ""
+					a.pendFocusKeyTag = true
+					a.w.Invalidate()
+				}
 			case a.messages.AuthorOpen():
 				a.messages.CloseAuthor()
 				a.w.Invalidate()
@@ -662,6 +647,57 @@ func (a *App) handleKeys(gtx layout.Context) {
 			a.w.Invalidate()
 		case a.linkPickerOpen && kev.Name == key.NameReturn:
 			a.linkPicker.Submit()
+		case composerFocused:
+			if a.composer.HandleKey(gtx, kev, a.onSend) {
+				a.w.Invalidate()
+				continue
+			}
+
+			// App-level composer shortcuts that need App state or special gtx commands
+			switch {
+			case (kev.Name == "V" || kev.Name == "v") && kev.Modifiers.Contain(key.ModCtrl):
+				slog.Info("Ctrl+V detected", "tag", fmt.Sprintf("%p", &a.composerPasteTag))
+				if !a.tryWaylandPaste() {
+					gtx.Execute(clipboard.ReadCmd{Tag: &a.composerPasteTag})
+				}
+			case kev.Name == "T" && kev.Modifiers.Contain(key.ModCtrl):
+				a.composer.TranslateToEnglish(func(text string, setFeedback func(string), done func(string, error)) {
+					urls := llm.ExtractURLs(text)
+					if len(urls) == 1 {
+						setFeedback("Summarizing link...")
+						go func() {
+							a.startTask("llm", "Summarizing link")
+							defer a.endTask("llm")
+							summarized, err := llm.SummarizeLink(context.Background(), text, urls[0])
+							if err != nil {
+								slog.Error("llm summarize failed", "error", err)
+								done("", err)
+								a.w.Invalidate()
+								return
+							}
+							done(summarized, nil)
+							a.w.Invalidate()
+						}()
+						return
+					}
+
+					setFeedback("Translating...")
+					go func() {
+						a.startTask("translate", "Translating")
+						defer a.endTask("translate")
+						translated, err := translate.ToEnglish(context.Background(), text)
+						if err != nil {
+							slog.Error("translate failed", "error", err)
+							done("", err)
+							a.w.Invalidate()
+							return
+						}
+						done(translated, nil)
+						a.w.Invalidate()
+					}()
+				})
+				a.w.Invalidate()
+			}
 		case (kev.Name == key.NameReturn || kev.Name == key.NameSpace) && a.focusPane == paneChannels && !a.switcherOpen && !a.reactionPickerOpen && !a.linkPickerOpen && !a.imageViewerOpen:
 			if a.channels.ToggleCursorHeader() {
 				a.w.Invalidate()
@@ -785,132 +821,6 @@ func (a *App) handleKeys(gtx layout.Context) {
 			a.w.Invalidate()
 		case a.reactionPickerOpen && kev.Name == "B" && kev.Modifiers.Contain(key.ModCtrl):
 			a.reactionPicker.MoveCursor(-1)
-			a.w.Invalidate()
-		case composerFocused && kev.Name == "C" && kev.Modifiers.Contain(key.ModCtrl):
-			a.composer.Clear()
-			a.w.Invalidate()
-		case composerFocused && (kev.Name == "V" || kev.Name == "v") && kev.Modifiers.Contain(key.ModCtrl):
-			slog.Info("Ctrl+V detected", "tag", fmt.Sprintf("%p", &a.composerPasteTag))
-			if !a.tryWaylandPaste() {
-				gtx.Execute(clipboard.ReadCmd{Tag: &a.composerPasteTag})
-			}
-		case composerFocused && (kev.Name == "W" || kev.Name == key.NameDeleteBackward) && kev.Modifiers.Contain(key.ModCtrl):
-			a.composer.DeleteLastWord()
-			a.w.Invalidate()
-		case composerFocused && kev.Name == key.NameLeftArrow && kev.Modifiers.Contain(key.ModCtrl):
-			a.composer.MoveWord(-1)
-			a.w.Invalidate()
-		case composerFocused && kev.Name == key.NameRightArrow && kev.Modifiers.Contain(key.ModCtrl):
-			a.composer.MoveWord(1)
-			a.w.Invalidate()
-		case composerFocused && kev.Name == "A" && kev.Modifiers.Contain(key.ModCtrl):
-			a.composer.SelectAll()
-			a.w.Invalidate()
-		case composerFocused && kev.Name == "E" && kev.Modifiers.Contain(key.ModCtrl):
-			a.composer.MoveToEnd()
-			a.w.Invalidate()
-		case composerFocused && kev.Name == "T" && kev.Modifiers.Contain(key.ModCtrl):
-			a.composer.TranslateToEnglish(func(text string, setFeedback func(string), done func(string, error)) {
-				urls := llm.ExtractURLs(text)
-				if len(urls) == 1 {
-					setFeedback("Summarizing link...")
-					go func() {
-						a.startTask("llm", "Summarizing link")
-						defer a.endTask("llm")
-						summarized, err := llm.SummarizeLink(context.Background(), text, urls[0])
-						if err != nil {
-							slog.Error("llm summarize failed", "error", err)
-							done("", err)
-							a.w.Invalidate()
-							return
-						}
-						done(summarized, nil)
-						a.w.Invalidate()
-					}()
-					return
-				}
-
-				setFeedback("Translating...")
-				go func() {
-					a.startTask("translate", "Translating")
-					defer a.endTask("translate")
-					translated, err := translate.ToEnglish(context.Background(), text)
-					if err != nil {
-						slog.Error("translate failed", "error", err)
-						done("", err)
-						a.w.Invalidate()
-						return
-					}
-					done(translated, nil)
-					a.w.Invalidate()
-				}()
-			})
-			a.w.Invalidate()
-		case composerFocused && a.composer.mentionPicker.Active() && kev.Name == key.NameUpArrow:
-			a.composer.mentionPicker.MoveSelection(-1)
-			a.atUpBoundary = false
-			a.atDownBoundary = false
-			a.w.Invalidate()
-		case composerFocused && key.NameUpArrow == kev.Name:
-			oldPos, _ := a.composer.editor.Selection()
-			a.composer.MoveLine(-1)
-			newPos, _ := a.composer.editor.Selection()
-			if oldPos == newPos {
-				if a.atUpBoundary {
-					if oldPos == 0 {
-						a.composer.HistoryPrev()
-					} else {
-						a.composer.MoveToStart()
-					}
-				} else {
-					a.atUpBoundary = true
-				}
-			} else {
-				a.atUpBoundary = false
-			}
-			a.atDownBoundary = false
-			a.w.Invalidate()
-		case composerFocused && a.composer.mentionPicker.Active() && kev.Name == key.NameDownArrow:
-			a.composer.mentionPicker.MoveSelection(1)
-			a.atUpBoundary = false
-			a.atDownBoundary = false
-			a.w.Invalidate()
-		case composerFocused && key.NameDownArrow == kev.Name:
-			oldPos, _ := a.composer.editor.Selection()
-			a.composer.MoveLine(1)
-			newPos, _ := a.composer.editor.Selection()
-			if oldPos == newPos {
-				lastPos := len([]rune(a.composer.editor.Text()))
-				if a.atDownBoundary {
-					if oldPos == lastPos {
-						a.composer.HistoryNext()
-					} else {
-						a.composer.MoveToEnd()
-					}
-				} else {
-					a.atDownBoundary = true
-				}
-			} else {
-				a.atDownBoundary = false
-			}
-			a.atUpBoundary = false
-			a.w.Invalidate()
-		case composerFocused && kev.Name == "P" && kev.Modifiers.Contain(key.ModCtrl):
-			if a.composer.mentionPicker.Active() {
-				a.composer.mentionPicker.MoveSelection(-1)
-			} else {
-				a.composer.HistoryPrev()
-			}
-			a.w.Invalidate()
-		case composerFocused && kev.Name == "N" && kev.Modifiers.Contain(key.ModCtrl):
-			if a.composer.mentionPicker.Active() {
-				a.composer.mentionPicker.MoveSelection(1)
-			} else {
-				a.composer.HistoryNext()
-			}
-			a.w.Invalidate()
-		case composerFocused && a.composer.mentionPicker.Active() && (kev.Name == key.NameReturn || kev.Name == key.NameTab || (kev.Name == "Y" && kev.Modifiers.Contain(key.ModCtrl))):
-			a.composer.mentionPicker.Submit()
 			a.w.Invalidate()
 		case a.reactionPickerOpen && (kev.Name == key.NameReturn || (kev.Name == "Y" && kev.Modifiers.Contain(key.ModCtrl))):
 			a.reactionPicker.Submit()
@@ -1045,6 +955,7 @@ func (a *App) handleKeys(gtx layout.Context) {
 				a.openReactionPicker()
 			}
 		case kev.Name == "I":
+			a.composer.SetInsertMode()
 			a.composerVisible = true
 			a.composerWasFocused = false
 			gtx.Execute(key.FocusCmd{Tag: &a.composer.editor})
@@ -1154,6 +1065,7 @@ func (a *App) openMessageEditor(gtx layout.Context) {
 		a.editingTS = ts
 		a.editingCh = chID
 		a.composer.SetPendingText(msg.Text)
+		a.composer.SetInsertMode()
 		a.composerVisible = true
 		a.composerWasFocused = false
 		gtx.Execute(key.FocusCmd{Tag: &a.composer.editor})
@@ -1307,10 +1219,8 @@ func (a *App) refreshAfterReaction(chID, ts string) {
 			return
 		}
 	}
-	if a.getActiveID() == chID {
-		a.fetchMessages(chID)
-		a.w.Invalidate()
-	}
+	a.refreshView(chID)
+	a.w.Invalidate()
 	_ = ts
 }
 
@@ -1392,9 +1302,7 @@ func (a *App) toggleSelectedPreview() {
 				a.fetchThread(chID, tTS)
 			}
 		}
-		if a.getActiveID() == chID {
-			a.fetchMessages(chID)
-		}
+		a.refreshView(chID)
 		a.w.Invalidate()
 	}()
 }
@@ -1411,11 +1319,21 @@ func (a *App) deleteMessage(ch, ts string) {
 				a.fetchThread(ch, tTS)
 			}
 		}
-		if a.getActiveID() == ch {
-			a.fetchMessages(ch)
-		}
+		a.refreshView(ch)
 		a.w.Invalidate()
 	}()
+}
+
+func (a *App) refreshView(chID string) {
+	id := a.getActiveID()
+	switch id {
+	case "__UNREADS__":
+		go a.fetchAllUnreads()
+	case "__THREADS__":
+		go a.fetchAllThreads()
+	case chID:
+		go a.fetchMessages(chID)
+	}
 }
 
 // openURL hands a URL to the system browser via xdg-open. Errors are logged
@@ -1596,10 +1514,17 @@ func (a *App) onChannelSelectWithContext(id string, ts string) {
 	a.editingTS = ""
 	a.editingCh = ""
 	if id == "__UNREADS__" {
-		a.messages.SetHeader("All Unreads", "Consolidated view of all unread messages across all channels")
+		a.messages.SetHeader("Mentions", "Consolidated view of all unread messages with mentions")
 		a.messages.SetMessages(nil)
 		a.w.Invalidate()
 		go a.fetchAllUnreads()
+		return
+	}
+	if id == "__THREADS__" {
+		a.messages.SetHeader("Threads", "Recent threads you are part of")
+		a.messages.SetMessages(nil)
+		a.w.Invalidate()
+		go a.fetchAllThreads()
 		return
 	}
 	if ch := a.client.Cache().GetChannel(id); ch != nil {
@@ -1607,7 +1532,7 @@ func (a *App) onChannelSelectWithContext(id string, ts string) {
 		if ch.UnreadCount > 0 && ch.LatestTS != "" {
 			// Optimistically clear the unread count in cache
 			a.client.Cache().SetChannelUnread(ch.ID, 0, 0, ch.LatestTS, ch.LatestTS)
-			a.channels.SetChannels(a.client.Cache().GetAllChannels())
+			a.requestSidebarPublish()
 
 			go func(channelID, latestTS string) {
 				if err := a.client.MarkChannel(channelID, latestTS); err != nil {
@@ -1701,7 +1626,7 @@ func (a *App) onSend(text string, attachments []Attachment) {
 		if threadTS != "" {
 			a.fetchThread(id, threadTS)
 		} else {
-			a.fetchMessages(id)
+			a.refreshView(id)
 		}
 		a.w.Invalidate()
 	}()
@@ -1739,8 +1664,9 @@ func (a *App) fetchThread(channelID, threadTS string) {
 	if curCh != channelID || curTS != threadTS {
 		return
 	}
-	a.messages.SetThreadMessages(msgs)
-	a.w.Invalidate()
+	if a.messages.SetThreadMessages(msgs) {
+		a.w.Invalidate()
+	}
 }
 
 func (a *App) getActiveID() string {
@@ -1758,7 +1684,10 @@ func (a *App) getActiveID() string {
 func (a *App) isMention(msg slack.Message) bool {
 	selfID := a.client.GetSelfID()
 	groups := a.client.Cache().GetAllUserGroups()
+	return a.isMentionWithContext(msg, selfID, groups)
+}
 
+func (a *App) isMentionWithContext(msg slack.Message, selfID string, groups []slack.UserGroup) bool {
 	// User mention: <@U123>
 	if strings.Contains(msg.Text, "<@"+selfID+">") {
 		return true
@@ -1778,7 +1707,7 @@ func (a *App) isMention(msg slack.Message) bool {
 	return false
 }
 
-func (a *App) updateChannelsSidebar(channels []slack.Channel) []slack.Channel {
+func (a *App) updateChannelsSidebar(channels []slack.Channel) ([]slack.Channel, bool) {
 	hidden := make(map[string]bool, len(a.cfg.Channels.Hidden))
 	for _, id := range a.cfg.Channels.Hidden {
 		hidden[id] = true
@@ -1789,16 +1718,60 @@ func (a *App) updateChannelsSidebar(channels []slack.Channel) []slack.Channel {
 			filtered = append(filtered, ch)
 		}
 	}
-	a.channels.SetChannels(filtered)
-	return filtered
+	changed := a.channels.SetChannels(filtered)
+	return filtered, changed
+}
+
+// requestSidebarPublish signals the publisher that the cache has changed
+// and the sidebar should be re-rendered. Multiple signals received during
+// the debounce window collapse into a single republish, so callers from
+// different goroutines can mutate the cache in parallel without showing
+// intermediate orderings.
+func (a *App) requestSidebarPublish() {
+	select {
+	case a.sidebarPublish <- struct{}{}:
+	default:
+	}
+}
+
+// runSidebarPublisher serves sidebar publish requests on a single goroutine.
+// After the first signal it waits for activity to settle, draining further
+// signals during the window so a burst of cache mutations only triggers one
+// SetChannels call. The result is a single visible reorder per refresh
+// cycle instead of a flicker through every intermediate state.
+func (a *App) runSidebarPublisher() {
+	const debounce = 150 * time.Millisecond
+	for range a.sidebarPublish {
+		timer := time.NewTimer(debounce)
+		settling := true
+		for settling {
+			select {
+			case <-a.sidebarPublish:
+				if !timer.Stop() {
+					<-timer.C
+				}
+				timer.Reset(debounce)
+			case <-timer.C:
+				settling = false
+			}
+		}
+		_, changed := a.updateChannelsSidebar(a.client.Cache().GetAllChannels())
+		if changed {
+			a.w.Invalidate()
+		}
+	}
 }
 
 func (a *App) pollChannels() {
-	// Try cached data first for instant UI.
+	// One-shot disk-cache load so the sidebar paints immediately on startup
+	// instead of staring at an empty pane until the first GetChannels round
+	// trip returns. Subsequent refreshes always come from the live API.
 	if cached, err := a.client.Cache().LoadChannelsFromDisk(); err == nil && len(cached) > 0 {
-		filtered := a.updateChannelsSidebar(cached)
+		filtered, changed := a.updateChannelsSidebar(cached)
 		a.autoSelectFirst(filtered)
-		a.w.Invalidate()
+		if changed {
+			a.w.Invalidate()
+		}
 	}
 	_, _ = a.client.Cache().LoadUsersFromDisk()
 	_, _ = a.client.Cache().LoadUserGroupsFromDisk()
@@ -1821,20 +1794,18 @@ func (a *App) pollChannels() {
 			slog.Error("GetChannels failed", "error", err)
 			return
 		}
-		filtered := a.updateChannelsSidebar(channels)
-		a.autoSelectFirst(filtered)
-		a.w.Invalidate()
-
-		// IM and MPIM names aren't fully resolved by GetChannels; do it in the
-		// background so the sidebar appears immediately, then refresh once names
-		// are in.
-		go func(chs []slack.Channel) {
-			a.startTask("resolve", "Resolving names")
-			defer a.endTask("resolve")
-			a.client.ResolveConversationNames(chs)
-			a.channels.SetChannels(chs)
-			a.w.Invalidate()
-		}(filtered)
+		// Resolve IM/MPIM names before publishing so the sidebar reflects the
+		// final names (sort is by activity then name; missing names would
+		// cause a visible re-order once they arrived).
+		a.client.ResolveConversationNames(channels)
+		// Route the publish through the debouncer instead of calling
+		// SetChannels directly. The priority tick and active-channel poll
+		// also signal the publisher; coalescing them under one debounce
+		// window means the user sees a single republish per refresh cycle
+		// instead of tick()'s ordering flashing past before the cached
+		// state catches up.
+		a.requestSidebarPublish()
+		a.autoSelectFirst(channels)
 	}
 
 	tick()
@@ -1851,12 +1822,31 @@ func (a *App) pollChannels() {
 			activeID := a.getActiveID()
 			priority := make([]string, 0, len(a.cfg.Channels.Pinned)+len(a.cfg.Channels.Hidden)+2)
 
-			if activeID == "__UNREADS__" {
-				// When looking at All Unreads, we need to know if ANY channel has new messages
+			now := time.Now()
+			isAggregate := activeID == "__UNREADS__" || activeID == "__THREADS__"
+			// conversations.list does not return per-channel `latest`, so without
+			// a periodic full scan a brand-new message in a channel that's not
+			// pinned/hidden/active and has no prior unreads will go undetected
+			// until the app is restarted. Force a full scan every 30s so new
+			// activity surfaces in the sidebar within that window.
+			fullDue := now.Sub(a.lastFullUnreadRefresh) >= 30*time.Second
+			isFullCheck := isAggregate || fullDue
+
+			if isAggregate && !fullDue {
+				// Aggregate views always need a full scan; if we just did one,
+				// wait for the rate limit to clear rather than running a partial
+				// scan that would leave the aggregate view stale.
+				continue
+			}
+
+			if isFullCheck {
+				a.lastFullUnreadRefresh = now
 				for _, ch := range a.client.Cache().GetAllChannels() {
 					priority = append(priority, ch.ID)
 				}
 			} else {
+				a.lastPriorityRefresh = now
+
 				priority = append(priority, a.cfg.Channels.Pinned...)
 				priority = append(priority, a.cfg.Channels.Hidden...)
 				if activeID != "" {
@@ -1871,7 +1861,7 @@ func (a *App) pollChannels() {
 			}
 
 			if len(priority) > 0 {
-				go func(ids []string) {
+				go func(ids []string, full bool) {
 					a.startTask("priority", "Updating unreads")
 					defer a.endTask("priority")
 					channels, err := a.client.GetUnreadCounts(ids)
@@ -1881,34 +1871,58 @@ func (a *App) pollChannels() {
 					}
 
 					// Perform background mention scan for any channel that has unreads
+					var scanWg sync.WaitGroup
+					sem := make(chan struct{}, 5) // limit concurrency to avoid rate limits
+					selfID := a.client.GetSelfID()
+					groups := a.client.Cache().GetAllUserGroups()
+
 					for _, ch := range channels {
 						if ch.UnreadCount > 0 {
-							msgs, err := a.client.GetMessages(ch.ID, 50, ch.LastReadTS)
-							if err == nil {
-								mentions := 0
-								for _, m := range msgs {
-									if a.isMention(m) {
-										mentions++
+							scanWg.Add(1)
+							go func(ch slack.Channel) {
+								defer scanWg.Done()
+								sem <- struct{}{}
+								defer func() { <-sem }()
+
+								msgs, err := a.client.GetMessages(ch.ID, 50, ch.LastReadTS)
+								if err == nil {
+									mentions := 0
+									isDM := ch.IsIM || ch.IsMPIM
+									for _, m := range msgs {
+										if a.isMentionWithContext(m, selfID, groups) {
+											mentions++
+										}
+									}
+									if cached := a.client.Cache().GetChannel(ch.ID); cached != nil {
+										if isDM {
+											// In DMs, every unread message (including threads) is a mention.
+											mentions = ch.UnreadCount
+										}
+										if cached.MentionCount != mentions {
+											a.client.Cache().SetChannelUnread(ch.ID, ch.UnreadCount, mentions, ch.LastReadTS, ch.LatestTS)
+											a.w.Invalidate()
+										}
 									}
 								}
-								if cached := a.client.Cache().GetChannel(ch.ID); cached != nil {
-									if cached.MentionCount != mentions {
-										a.client.Cache().SetChannelUnread(ch.ID, ch.UnreadCount, mentions, ch.LastReadTS, ch.LatestTS)
-									}
-								}
-							}
+							}(ch)
 						}
 					}
+					scanWg.Wait()
 
-					// Update the sidebar
-					a.updateChannelsSidebar(a.client.Cache().GetAllChannels())
-					a.w.Invalidate()
+					// Coalesce the sidebar republish with any concurrent
+					// updates (active-channel poll, mention scans) so the
+					// user sees one final ordering instead of intermediate
+					// states that re-sort and snap back.
+					a.requestSidebarPublish()
 
-					// If we're in the All Unreads view, trigger a full refresh
+					// If we're in the aggregate views, trigger a full refresh of the message list
+					// but only if we just did a full scan or if the active view is empty.
 					if a.getActiveID() == "__UNREADS__" {
-						a.fetchAllUnreads()
+						go a.fetchAllUnreads()
+					} else if a.getActiveID() == "__THREADS__" {
+						go a.fetchAllThreads()
 					}
-				}(priority)
+				}(priority, isFullCheck)
 			}
 		}
 	}
@@ -1922,11 +1936,10 @@ func (a *App) forceRefresh() {
 		priority := make([]string, 0, len(a.cfg.Channels.Pinned)+len(a.cfg.Channels.Hidden))
 		priority = append(priority, a.cfg.Channels.Pinned...)
 		priority = append(priority, a.cfg.Channels.Hidden...)
-		channels, err := a.client.GetChannels(a.cfg.Channels.Types, priority)
+		_, err := a.client.GetChannels(a.cfg.Channels.Types, priority)
 		if err == nil {
-			a.updateChannelsSidebar(channels)
+			a.requestSidebarPublish()
 		}
-		a.w.Invalidate()
 	}()
 	if a.messages.InThread() {
 		chID, threadTS := a.messages.ThreadInfo()
@@ -1940,6 +1953,8 @@ func (a *App) forceRefresh() {
 		return
 	case "__UNREADS__":
 		go a.fetchAllUnreads()
+	case "__THREADS__":
+		go a.fetchAllThreads()
 	default:
 		go a.fetchMessages(id)
 	}
@@ -1957,6 +1972,8 @@ func (a *App) pollActiveChannel() {
 		}
 		if id == "__UNREADS__" {
 			a.fetchAllUnreads()
+		} else if id == "__THREADS__" {
+			a.fetchAllThreads()
 		} else {
 			a.fetchMessages(id)
 		}
@@ -1982,10 +1999,16 @@ func (a *App) fetchMessages(id string) {
 	}
 
 	mentionsFound := 0
+	isDM := ch.IsIM || ch.IsMPIM
+	selfID := a.client.GetSelfID()
+	groups := a.client.Cache().GetAllUserGroups()
 	for _, m := range msgs {
-		if m.Timestamp > ch.LastReadTS && a.isMention(m) {
+		if m.Timestamp > ch.LastReadTS && a.isMentionWithContext(m, selfID, groups) {
 			mentionsFound++
 		}
+	}
+	if isDM {
+		mentionsFound = ch.UnreadCount
 	}
 
 	// Update LatestTS and MentionCount in cache if we found newer messages
@@ -2016,12 +2039,13 @@ func (a *App) fetchMessages(id string) {
 	}
 
 	if changed {
-		a.channels.SetChannels(a.client.Cache().GetAllChannels())
+		a.requestSidebarPublish()
 	}
 
 	if a.getActiveID() == id && !a.viewingContext {
-		a.messages.SetMessages(msgs)
-		a.w.Invalidate()
+		if a.messages.SetMessages(msgs) {
+			a.w.Invalidate()
+		}
 	}
 }
 
@@ -2039,8 +2063,9 @@ func (a *App) fetchMessagesAround(id string, ts string) {
 	}
 
 	if a.getActiveID() == id {
-		a.messages.SetMessages(msgs)
-		a.w.Invalidate()
+		if a.messages.SetMessages(msgs) {
+			a.w.Invalidate()
+		}
 	}
 }
 
@@ -2048,39 +2073,128 @@ func (a *App) fetchAllUnreads() {
 	a.startTask("unreads", "Fetching unreads")
 	defer a.endTask("unreads")
 	var all []slack.Message
+	var mu sync.Mutex
 	channels := a.client.Cache().GetAllChannels()
+
+	var wg sync.WaitGroup
+	sem := make(chan struct{}, 10)
+	selfID := a.client.GetSelfID()
+	groups := a.client.Cache().GetAllUserGroups()
 
 	for _, ch := range channels {
 		if ch.UnreadCount > 0 {
-			msgs, err := a.client.GetMessages(ch.ID, 100, ch.LastReadTS)
-			if err != nil {
-				slog.Error("fetchAllUnreads failed", "channel", ch.ID, "error", err)
+			wg.Add(1)
+			go func(ch slack.Channel) {
+				defer wg.Done()
+				sem <- struct{}{}
+				defer func() { <-sem }()
+
+				msgs, err := a.client.GetMessages(ch.ID, 100, ch.LastReadTS)
+				if err != nil {
+					slog.Error("fetchAllUnreads failed", "channel", ch.ID, "error", err)
+					return
+				}
+				mentionsFound := 0
+				isDM := ch.IsIM || ch.IsMPIM
+				var channelMsgs []slack.Message
+				for i := range msgs {
+					if isDM || a.isMentionWithContext(msgs[i], selfID, groups) {
+						msgs[i].ChannelID = ch.ID
+						msgs[i].ChannelName = ch.Name
+						channelMsgs = append(channelMsgs, msgs[i])
+						mentionsFound++
+					}
+				}
+				if len(channelMsgs) > 0 {
+					mu.Lock()
+					all = append(all, channelMsgs...)
+					mu.Unlock()
+				}
+
+				// Update the cache with the actual mention count (authoritative for DMs)
+				if isDM {
+					mentionsFound = ch.UnreadCount
+				}
+				if cached := a.client.Cache().GetChannel(ch.ID); cached != nil {
+					if cached.MentionCount != mentionsFound {
+						a.client.Cache().SetChannelUnread(ch.ID, cached.UnreadCount, mentionsFound, cached.LastReadTS, cached.LatestTS)
+					}
+				}
+			}(ch)
+		}
+	}
+	wg.Wait()
+
+	// Also include unread threads from search. Search "has:thread" gives us recently active threads.
+	// We filter for those with replies newer than our last read of that channel.
+	threadResults, err := a.client.Search("has:thread OR (is:dm has:thread)")
+	if err == nil {
+		for _, r := range threadResults {
+			ch := a.client.Cache().GetChannel(r.ChannelID)
+			if ch == nil {
 				continue
 			}
-			mentionsFound := 0
-			for i := range msgs {
-				isDM := ch.IsIM || ch.IsMPIM
-				if isDM || a.isMention(msgs[i]) {
-					msgs[i].ChannelID = ch.ID
-					msgs[i].ChannelName = ch.Name
-					all = append(all, msgs[i])
-					mentionsFound++
+			isDM := ch.IsIM || ch.IsMPIM
+			isMention := a.isMention(r.Message)
+			if (isDM || isMention) && r.Message.LastReplyTS > ch.LastReadTS {
+				// Avoid duplicates if the parent itself was already added
+				found := false
+				for _, m := range all {
+					if m.Timestamp == r.Message.Timestamp && m.ChannelID == r.ChannelID {
+						found = true
+						break
+					}
 				}
-			}
-			// Update the cache with the actual mention count we found
-			if cached := a.client.Cache().GetChannel(ch.ID); cached != nil {
-				if cached.MentionCount != mentionsFound {
-					a.client.Cache().SetChannelUnread(ch.ID, cached.UnreadCount, mentionsFound, cached.LastReadTS, cached.LatestTS)
+				if !found {
+					m := r.Message
+					m.ChannelID = r.ChannelID
+					m.ChannelName = r.ChannelName
+					all = append(all, m)
 				}
 			}
 		}
 	}
+
 	sort.Slice(all, func(i, j int) bool {
 		return all[i].Timestamp < all[j].Timestamp
 	})
 	if a.getActiveID() == "__UNREADS__" {
-		a.messages.SetMessages(all)
-		a.w.Invalidate()
+		if a.messages.SetMessages(all) {
+			a.w.Invalidate()
+		}
+	}
+}
+
+func (a *App) fetchAllThreads() {
+	a.startTask("threads", "Fetching threads")
+	defer a.endTask("threads")
+	// Note: Slack's search API is used as a fallback since there's no direct "all threads" API.
+	results, err := a.client.Search("has:thread OR (is:dm has:thread)")
+	if err != nil {
+		slog.Error("fetchAllThreads failed", "error", err)
+		return
+	}
+	var msgs []slack.Message
+	for _, r := range results {
+		m := r.Message
+		m.ChannelID = r.ChannelID
+		m.ChannelName = r.ChannelName
+		// Search results for "has:thread" are by definition thread roots (or
+		// replies, but we treat them as roots). UI needs ReplyCount > 0 to
+		// show the thread indicator.
+		m.ReplyCount = 1
+		if m.ThreadTS == "" {
+			m.ThreadTS = m.Timestamp
+		}
+		msgs = append(msgs, m)
+	}
+	sort.Slice(msgs, func(i, j int) bool {
+		return msgs[i].Timestamp > msgs[j].Timestamp
+	})
+	if a.getActiveID() == "__THREADS__" {
+		if a.messages.SetMessages(msgs) {
+			a.w.Invalidate()
+		}
 	}
 }
 
