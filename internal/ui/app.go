@@ -109,6 +109,11 @@ type App struct {
 	// Tracks if the last Up/Down press hit a boundary without moving.
 	atUpBoundary   bool
 	atDownBoundary bool
+
+	editingTS string
+	editingCh string
+
+	pendingG bool
 }
 
 // Run blocks running the GUI until the window is closed.
@@ -146,6 +151,7 @@ func Run(client *slack.Client, cfg *config.Config) error {
 	a.backgroundTasks = make(map[string]string)
 	a.channels.SetFavorites(state.Favorites, a.onFavoritesChanged)
 	a.channels.SetCollapsedGroups(state.CollapsedGroups, a.onCollapsedGroupsChanged)
+	a.channels.SetHidden(a.cfg.Channels.Hidden)
 	a.messages = newMessagesView(images)
 	a.composer = newComposer()
 	a.uploadProgress.Store(-1)
@@ -377,7 +383,9 @@ func (a *App) layout(gtx layout.Context) layout.Dimensions {
 								return layout.Dimensions{}
 							}
 							placeholder := "Message"
-							if id := a.getActiveID(); id != "" {
+							if a.editingTS != "" {
+								placeholder = "Edit message"
+							} else if id := a.getActiveID(); id != "" {
 								if ch := a.client.Cache().GetChannel(id); ch != nil {
 									placeholder = "Message #" + ch.Name
 								}
@@ -536,10 +544,11 @@ func (a *App) handleKeys(gtx layout.Context) {
 			key.Filter{Name: "I"},
 			key.Filter{Name: "H"},
 			key.Filter{Name: "L"},
-			key.Filter{Name: "E"},
+			key.Filter{Name: "E", Optional: key.ModShift},
 			key.Filter{Name: "D", Optional: key.ModShift},
-			key.Filter{Name: "Y"},
+			key.Filter{Name: "Y", Optional: key.ModShift},
 			key.Filter{Name: "R", Optional: key.ModShift},
+			key.Filter{Name: "G", Optional: key.ModShift},
 			key.Filter{Name: "Q"},
 			key.Filter{Name: "F"},
 			key.Filter{Name: "F", Required: key.ModCtrl},
@@ -577,7 +586,31 @@ func (a *App) handleKeys(gtx layout.Context) {
 		if !ok || kev.State != key.Press {
 			continue
 		}
+
+		wasPendingG := a.pendingG
+		a.pendingG = false
+
 		switch {
+		case kev.Name == "G":
+			delta := 1000000
+			if !kev.Modifiers.Contain(key.ModShift) {
+				if wasPendingG {
+					delta = -1000000
+				} else {
+					a.pendingG = true
+					continue
+				}
+			}
+			switch {
+			case a.linkPickerOpen:
+				a.linkPicker.MoveSelection(delta)
+				a.w.Invalidate()
+			case a.imageViewerOpen:
+				a.imageViewer.MoveSelection(delta)
+				a.w.Invalidate()
+			default:
+				a.moveInPane(delta)
+			}
 		case kev.Name == "K" && kev.Modifiers.Contain(key.ModCtrl):
 			if a.switcherOpen {
 				a.closeSwitcher()
@@ -603,6 +636,8 @@ func (a *App) handleKeys(gtx layout.Context) {
 					a.closeMessageEditor()
 				}
 			case composerFocused:
+				a.editingTS = ""
+				a.editingCh = ""
 				a.pendFocusKeyTag = true
 				a.w.Invalidate()
 			case a.messages.AuthorOpen():
@@ -816,7 +851,7 @@ func (a *App) handleKeys(gtx layout.Context) {
 			a.atUpBoundary = false
 			a.atDownBoundary = false
 			a.w.Invalidate()
-		case composerFocused && kev.Name == key.NameUpArrow:
+		case composerFocused && key.NameUpArrow == kev.Name:
 			oldPos, _ := a.composer.editor.Selection()
 			a.composer.MoveLine(-1)
 			newPos, _ := a.composer.editor.Selection()
@@ -840,7 +875,7 @@ func (a *App) handleKeys(gtx layout.Context) {
 			a.atUpBoundary = false
 			a.atDownBoundary = false
 			a.w.Invalidate()
-		case composerFocused && kev.Name == key.NameDownArrow:
+		case composerFocused && key.NameDownArrow == kev.Name:
 			oldPos, _ := a.composer.editor.Selection()
 			a.composer.MoveLine(1)
 			newPos, _ := a.composer.editor.Selection()
@@ -950,7 +985,7 @@ func (a *App) handleKeys(gtx layout.Context) {
 			}
 		case kev.Name == "E":
 			if a.focusPane == paneMessages {
-				a.openMessageEditor()
+				a.openMessageEditor(gtx)
 			}
 		case kev.Name == "Y":
 			if a.messages.AuthorOpen() {
@@ -961,14 +996,23 @@ func (a *App) handleKeys(gtx layout.Context) {
 					})
 				}
 			} else if a.focusPane == paneMessages {
-				msg, _, ok := a.messages.SelectedMessage()
+				msg, ts, ok := a.messages.SelectedMessage()
 				if ok {
-					text := a.fmt.Format(msg.Text)
-					for _, f := range msg.Files {
-						if text != "" {
-							text += "\n"
+					var text string
+					if kev.Modifiers.Contain(key.ModShift) {
+						chID := a.getActiveID()
+						if chID == "__UNREADS__" && msg.ChannelID != "" {
+							chID = msg.ChannelID
 						}
-						text += f.PreferredImageURL()
+						text = a.client.Permalink(chID, ts)
+					} else {
+						text = a.fmt.Format(msg.Text)
+						for _, f := range msg.Files {
+							if text != "" {
+								text += "\n"
+							}
+							text += f.PreferredImageURL()
+						}
 					}
 					if text != "" {
 						gtx.Execute(clipboard.WriteCmd{
@@ -979,6 +1023,11 @@ func (a *App) handleKeys(gtx layout.Context) {
 				}
 			}
 		case kev.Name == "R":
+			// R on the channels pane triggers a full refresh/poll.
+			if a.focusPane == paneChannels {
+				go a.pollChannels()
+				break
+			}
 			// Shift differentiates the two reaction shortcuts: capital R
 			// echoes every reaction already on the message, lowercase r
 			// opens the picker so the user can choose a new one.
@@ -1078,11 +1127,32 @@ func (a *App) closeImageViewer() {
 	a.w.Invalidate()
 }
 
-func (a *App) openMessageEditor() {
-	msg, _, ok := a.messages.SelectedMessage()
+func (a *App) openMessageEditor(gtx layout.Context) {
+	msg, ts, ok := a.messages.SelectedMessage()
 	if !ok {
 		return
 	}
+
+	// If it's my message, edit it in the composer instead of opening the
+	// read-only full-screen editor.
+	if msg.UserID == a.client.GetSelfID() {
+		chID := a.getActiveID()
+		if chID == "__UNREADS__" && msg.ChannelID != "" {
+			chID = msg.ChannelID
+		}
+		if chID == "" {
+			return
+		}
+		a.editingTS = ts
+		a.editingCh = chID
+		a.composer.SetPendingText(msg.Text)
+		a.composerVisible = true
+		a.composerWasFocused = false
+		gtx.Execute(key.FocusCmd{Tag: &a.composer.editor})
+		a.w.Invalidate()
+		return
+	}
+
 	text := a.fmt.Format(msg.Text)
 	for _, f := range msg.Files {
 		if text != "" {
@@ -1515,6 +1585,8 @@ func (a *App) onChannelSelectWithContext(id string, ts string) {
 	a.activeID.Store(id)
 	a.channels.SetActive(id)
 	a.messages.Reset()
+	a.editingTS = ""
+	a.editingCh = ""
 	if id == "__UNREADS__" {
 		a.messages.SetHeader("All Unreads", "Consolidated view of all unread messages across all channels")
 		a.messages.SetMessages(nil)
@@ -1557,6 +1629,11 @@ func (a *App) onSend(text string, attachments []Attachment) {
 	a.pendFocusKeyTag = true
 	a.setFocusPane(paneMessages)
 
+	editingTS := a.editingTS
+	editingCh := a.editingCh
+	a.editingTS = ""
+	a.editingCh = ""
+
 	threadTS := ""
 	if a.messages.InThread() {
 		_, threadTS = a.messages.ThreadInfo()
@@ -1588,17 +1665,27 @@ func (a *App) onSend(text string, attachments []Attachment) {
 				}
 			}
 		} else {
-			a.startTask("send", "Sending message")
-			defer a.endTask("send")
-			var err error
-			if threadTS != "" {
-				err = a.client.SendThreadReply(id, threadTS, text)
+			if editingTS != "" {
+				a.startTask("edit", "Editing message")
+				defer a.endTask("edit")
+				err := a.client.UpdateMessage(editingCh, editingTS, text)
+				if err != nil {
+					slog.Error("edit failed", "channel", editingCh, "ts", editingTS, "error", err)
+					return
+				}
 			} else {
-				err = a.client.SendMessage(id, text)
-			}
-			if err != nil {
-				slog.Error("send failed", "channel", id, "thread", threadTS, "error", err)
-				return
+				a.startTask("send", "Sending message")
+				defer a.endTask("send")
+				var err error
+				if threadTS != "" {
+					err = a.client.SendThreadReply(id, threadTS, text)
+				} else {
+					err = a.client.SendMessage(id, text)
+				}
+				if err != nil {
+					slog.Error("send failed", "channel", id, "thread", threadTS, "error", err)
+					return
+				}
 			}
 		}
 
@@ -1683,11 +1770,26 @@ func (a *App) isMention(msg slack.Message) bool {
 	return false
 }
 
+func (a *App) updateChannelsSidebar(channels []slack.Channel) []slack.Channel {
+	hidden := make(map[string]bool, len(a.cfg.Channels.Hidden))
+	for _, id := range a.cfg.Channels.Hidden {
+		hidden[id] = true
+	}
+	filtered := make([]slack.Channel, 0, len(channels))
+	for _, ch := range channels {
+		if !hidden[ch.ID] || ch.UnreadCount > 0 || ch.MentionCount > 0 {
+			filtered = append(filtered, ch)
+		}
+	}
+	a.channels.SetChannels(filtered)
+	return filtered
+}
+
 func (a *App) pollChannels() {
 	// Try cached data first for instant UI.
 	if cached, err := a.client.Cache().LoadChannelsFromDisk(); err == nil && len(cached) > 0 {
-		a.channels.SetChannels(cached)
-		a.autoSelectFirst(cached)
+		filtered := a.updateChannelsSidebar(cached)
+		a.autoSelectFirst(filtered)
 		a.w.Invalidate()
 	}
 	_, _ = a.client.Cache().LoadUsersFromDisk()
@@ -1703,23 +1805,15 @@ func (a *App) pollChannels() {
 	tick := func() {
 		a.startTask("channels", "Syncing channels")
 		defer a.endTask("channels")
-		channels, err := a.client.GetChannels(a.cfg.Channels.Types, a.cfg.Channels.Pinned)
+		priority := make([]string, 0, len(a.cfg.Channels.Pinned)+len(a.cfg.Channels.Hidden))
+		priority = append(priority, a.cfg.Channels.Pinned...)
+		priority = append(priority, a.cfg.Channels.Hidden...)
+		channels, err := a.client.GetChannels(a.cfg.Channels.Types, priority)
 		if err != nil {
 			slog.Error("GetChannels failed", "error", err)
 			return
 		}
-		// Filter hidden.
-		hidden := make(map[string]bool, len(a.cfg.Channels.Hidden))
-		for _, id := range a.cfg.Channels.Hidden {
-			hidden[id] = true
-		}
-		filtered := channels[:0]
-		for _, ch := range channels {
-			if !hidden[ch.ID] {
-				filtered = append(filtered, ch)
-			}
-		}
-		a.channels.SetChannels(filtered)
+		filtered := a.updateChannelsSidebar(channels)
 		a.autoSelectFirst(filtered)
 		a.w.Invalidate()
 
@@ -1747,7 +1841,7 @@ func (a *App) pollChannels() {
 		case <-pt.C:
 			// Refresh unread counts for priority channels
 			activeID := a.getActiveID()
-			priority := make([]string, 0, len(a.cfg.Channels.Pinned)+2)
+			priority := make([]string, 0, len(a.cfg.Channels.Pinned)+len(a.cfg.Channels.Hidden)+2)
 
 			if activeID == "__UNREADS__" {
 				// When looking at All Unreads, we need to know if ANY channel has new messages
@@ -1756,6 +1850,7 @@ func (a *App) pollChannels() {
 				}
 			} else {
 				priority = append(priority, a.cfg.Channels.Pinned...)
+				priority = append(priority, a.cfg.Channels.Hidden...)
 				if activeID != "" {
 					priority = append(priority, activeID)
 				}
@@ -1798,7 +1893,7 @@ func (a *App) pollChannels() {
 					}
 
 					// Update the sidebar
-					a.channels.SetChannels(a.client.Cache().GetAllChannels())
+					a.updateChannelsSidebar(a.client.Cache().GetAllChannels())
 					a.w.Invalidate()
 
 					// If we're in the All Unreads view, trigger a full refresh
@@ -1816,7 +1911,13 @@ func (a *App) pollChannels() {
 // It also re-syncs the channel list so unread badges update.
 func (a *App) forceRefresh() {
 	go func() {
-		_, _ = a.client.GetChannels(a.cfg.Channels.Types, a.cfg.Channels.Pinned)
+		priority := make([]string, 0, len(a.cfg.Channels.Pinned)+len(a.cfg.Channels.Hidden))
+		priority = append(priority, a.cfg.Channels.Pinned...)
+		priority = append(priority, a.cfg.Channels.Hidden...)
+		channels, err := a.client.GetChannels(a.cfg.Channels.Types, priority)
+		if err == nil {
+			a.updateChannelsSidebar(channels)
+		}
 		a.w.Invalidate()
 	}()
 	if a.messages.InThread() {

@@ -196,6 +196,8 @@ type Client struct {
 	token  string
 	cookie string
 
+	workspaceURL string
+
 	disableLinkUnfurl  bool
 	disableMediaUnfurl bool
 }
@@ -234,7 +236,18 @@ func (c *Client) AuthTest() (string, error) {
 	if err != nil {
 		return "", fmt.Errorf("auth test failed: %w", err)
 	}
+	c.workspaceURL = resp.URL
 	return resp.UserID, nil
+}
+
+func (c *Client) Permalink(channelID, timestamp string) string {
+	if c.workspaceURL == "" || channelID == "" || timestamp == "" {
+		return ""
+	}
+	// Permalinks are https://{domain}.slack.com/archives/{channelID}/p{timestampWithoutDot}
+	ts := strings.ReplaceAll(timestamp, ".", "")
+	url := strings.TrimSuffix(c.workspaceURL, "/")
+	return fmt.Sprintf("%s/archives/%s/p%s", url, channelID, ts)
 }
 
 // VerifyFileAccess pokes files.list with a tiny page size so we can tell
@@ -833,6 +846,13 @@ func (c *Client) AddReaction(channelID, timestamp, emoji string) error {
 		return friendlyError(err)
 	}
 	return nil
+}
+
+func (c *Client) GetPermalink(channelID, timestamp string) (string, error) {
+	return c.api.GetPermalink(&slackapi.PermalinkParameters{
+		Channel: channelID,
+		Ts:      timestamp,
+	})
 }
 
 func (c *Client) RemoveReaction(channelID, timestamp, emoji string) error {

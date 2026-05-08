@@ -44,6 +44,12 @@ type ChannelsSidebar struct {
 	collapsed          map[string]bool
 	onCollapsedChanged func([]string)
 
+	// hidden is the set of channel IDs the user has chosen to hide via config.
+	// They normally don't appear in the sidebar; when they do (because of
+	// unreads/mentions) they are floated to the top of their category so the
+	// activity isn't lost behind never-hidden channels.
+	hidden map[string]bool
+
 	// raw retains the most recent unsorted channel set so we can re-group when
 	// favorites change without waiting for the next poll.
 	raw []slack.Channel
@@ -74,9 +80,26 @@ func newChannelsSidebar(onSelect func(id string)) *ChannelsSidebar {
 		onSelect:  onSelect,
 		favorites: make(map[string]bool),
 		collapsed: make(map[string]bool),
+		hidden:    make(map[string]bool),
 	}
 	cs.list.Axis = layout.Vertical
 	return cs
+}
+
+// SetHidden replaces the set of channel IDs flagged hidden in config. Hidden
+// channels are filtered upstream when they have no unreads; the sidebar uses
+// this set to float the ones that did surface to the top of their category.
+func (s *ChannelsSidebar) SetHidden(ids []string) {
+	set := make(map[string]bool, len(ids))
+	for _, id := range ids {
+		set[id] = true
+	}
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	s.hidden = set
+	if s.raw != nil {
+		s.dirty = true
+	}
 }
 
 // SetActive marks the given channel ID as the highlighted one. The cursor
@@ -367,6 +390,13 @@ func (s *ChannelsSidebar) rebuildRowsLocked() {
 	byActivity := func(group []slack.Channel) {
 		sort.SliceStable(group, func(i, j int) bool {
 			ci, cj := group[i], group[j]
+			// Hidden channels only surface here when they have new activity, so
+			// float them to the top of the category — otherwise they'd be lost
+			// behind always-visible channels.
+			hi, hj := s.hidden[ci.ID], s.hidden[cj.ID]
+			if hi != hj {
+				return hi
+			}
 			// Prioritize unread count (relevant for Favorites and category groups)
 			if (ci.UnreadCount > 0) != (cj.UnreadCount > 0) {
 				return ci.UnreadCount > 0

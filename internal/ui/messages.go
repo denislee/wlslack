@@ -73,6 +73,7 @@ type authorField struct {
 type messageRow struct {
 	msg     slack.Message
 	rich    []richtext.InteractiveText
+	arrival time.Time
 }
 
 func newMessagesView(images *slack.ImageLoader) *MessagesView {
@@ -102,6 +103,7 @@ func (m *MessagesView) Reset() {
 	m.list.ScrollToEnd = true
 	m.list.Position.BeforeEnd = false
 	m.pendFocusLast = false
+	m.rows = nil
 	m.threadActive = false
 	m.threadChannel = ""
 	m.threadTS = ""
@@ -479,11 +481,15 @@ func (m *MessagesView) SetThreadMessages(msgs []slack.Message) {
 	if m.threadSelected >= 0 && m.threadSelected < len(m.threadRows) {
 		selectedTS = m.threadRows[m.threadSelected].msg.Timestamp
 	}
+	wasEmpty := len(m.threadRows) == 0
 	out := make([]*messageRow, 0, len(msgs))
 	for _, msg := range msgs {
 		r, ok := old[msg.Timestamp]
 		if !ok {
 			r = &messageRow{}
+			if !wasEmpty {
+				r.arrival = time.Now()
+			}
 		}
 		r.msg = msg
 		out = append(out, r)
@@ -581,11 +587,15 @@ func (m *MessagesView) SetMessages(msgs []slack.Message) {
 	if m.selected >= 0 && m.selected < len(m.rows) {
 		selectedTS = m.rows[m.selected].msg.Timestamp
 	}
+	wasEmpty := len(m.rows) == 0
 	out := make([]*messageRow, 0, len(msgs))
 	for _, msg := range msgs {
 		r, ok := old[msg.Timestamp]
 		if !ok {
 			r = &messageRow{}
+			if !wasEmpty {
+				r.arrival = time.Now()
+			}
 		}
 		r.msg = msg
 		out = append(out, r)
@@ -910,6 +920,20 @@ func (m *MessagesView) layoutRowLocked(gtx layout.Context, th *Theme, fmt *slack
 	if isSelected {
 		bg = th.Pal.BgRowAlt
 	}
+
+	const highlightDuration = 2 * time.Second
+	if !r.arrival.IsZero() {
+		elapsed := gtx.Now.Sub(r.arrival)
+		if elapsed < highlightDuration {
+			progress := float32(elapsed) / float32(highlightDuration)
+			alpha := uint8(255 * (1 - progress) * 0.15)
+			highlight := th.Pal.Accent
+			highlight.A = alpha
+			bg = blend(bg, highlight)
+			gtx.Execute(op.InvalidateCmd{})
+		}
+	}
+
 	showDivider := idx == 0
 	if idx > 0 {
 		showDivider = dayChanged(rows[idx-1].msg.Timestamp, r.msg.Timestamp)
@@ -1503,4 +1527,20 @@ func lighten(c color.NRGBA) color.NRGBA {
 		return v + by
 	}
 	return color.NRGBA{R: add(c.R, 16), G: add(c.G, 16), B: add(c.B, 16), A: c.A}
+}
+
+func blend(bg, fg color.NRGBA) color.NRGBA {
+	if fg.A == 0 {
+		return bg
+	}
+	if fg.A == 255 {
+		return fg
+	}
+	alpha := float32(fg.A) / 255
+	return color.NRGBA{
+		R: uint8(float32(bg.R)*(1-alpha) + float32(fg.R)*alpha),
+		G: uint8(float32(bg.G)*(1-alpha) + float32(fg.G)*alpha),
+		B: uint8(float32(bg.B)*(1-alpha) + float32(fg.B)*alpha),
+		A: bg.A,
+	}
 }

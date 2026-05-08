@@ -303,16 +303,16 @@ func (s *SettingsScreen) layoutThemeToggles(gtx layout.Context, th *Theme) layou
 		layout.Rigid(func(gtx layout.Context) layout.Dimensions {
 			return layout.Flex{Alignment: layout.Middle}.Layout(gtx,
 				layout.Rigid(func(gtx layout.Context) layout.Dimensions {
-					lbl := material.Body2(th.Mat, "Disable Link Previews")
+					lbl := material.Body2(th.Mat, "Show Link Previews")
 					th.applyFont(&lbl, FontStyle{})
 					lbl.Color = th.Pal.TextDim
 					gtx.Constraints.Min.X = gtx.Dp(unit.Dp(160))
 					return lbl.Layout(gtx)
 				}),
 				layout.Rigid(func(gtx layout.Context) layout.Dimensions {
-					label := "off"
+					label := "on"
 					if th.DisableLinkUnfurl {
-						label = "on"
+						label = "off"
 					}
 					return s.button(gtx, th, &s.toggleLinkUnfurl, label)
 				}),
@@ -322,16 +322,16 @@ func (s *SettingsScreen) layoutThemeToggles(gtx layout.Context, th *Theme) layou
 		layout.Rigid(func(gtx layout.Context) layout.Dimensions {
 			return layout.Flex{Alignment: layout.Middle}.Layout(gtx,
 				layout.Rigid(func(gtx layout.Context) layout.Dimensions {
-					lbl := material.Body2(th.Mat, "Disable Media Previews")
+					lbl := material.Body2(th.Mat, "Show Media Previews")
 					th.applyFont(&lbl, FontStyle{})
 					lbl.Color = th.Pal.TextDim
 					gtx.Constraints.Min.X = gtx.Dp(unit.Dp(160))
 					return lbl.Layout(gtx)
 				}),
 				layout.Rigid(func(gtx layout.Context) layout.Dimensions {
-					label := "off"
+					label := "on"
 					if th.DisableMediaUnfurl {
-						label = "on"
+						label = "off"
 					}
 					return s.button(gtx, th, &s.toggleMediaUnfurl, label)
 				}),

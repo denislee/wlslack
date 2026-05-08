@@ -60,3 +60,38 @@ func TestExtractAttachmentText(t *testing.T) {
 		})
 	}
 }
+
+func TestPermalink(t *testing.T) {
+	c := &Client{
+		workspaceURL: "https://example.slack.com/",
+	}
+
+	tests := []struct {
+		channelID string
+		timestamp string
+		expected  string
+	}{
+		{
+			channelID: "C12345",
+			timestamp: "1621234567.000100",
+			expected:  "https://example.slack.com/archives/C12345/p1621234567000100",
+		},
+		{
+			channelID: "D12345",
+			timestamp: "1621234567.890123",
+			expected:  "https://example.slack.com/archives/D12345/p1621234567890123",
+		},
+		{
+			channelID: "",
+			timestamp: "1621234567.000100",
+			expected:  "",
+		},
+	}
+
+	for _, tt := range tests {
+		got := c.Permalink(tt.channelID, tt.timestamp)
+		if got != tt.expected {
+			t.Errorf("Permalink(%q, %q) = %q, want %q", tt.channelID, tt.timestamp, got, tt.expected)
+		}
+	}
+}
