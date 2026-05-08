@@ -317,9 +317,9 @@ func (q *QuickSwitcher) Layout(gtx layout.Context, th *Theme) layout.Dimensions 
 					return withBorder(gtx, th.Pal.BorderStrong, borders{Top: true, Right: true, Bottom: true, Left: true}, func(gtx layout.Context) layout.Dimensions {
 						return paintedBg(gtx, th.Pal.BgCode, func(gtx layout.Context) layout.Dimensions {
 							return layout.UniformInset(unit.Dp(10)).Layout(gtx, func(gtx layout.Context) layout.Dimensions {
-								hint := "Jump to channel or DM…"
+								hint := "Jump to channel or DM..."
 								if q.tab == tabMessages {
-									hint = "Search messages…"
+									hint = "Search messages..."
 								}
 								ed := material.Editor(th.Mat, &q.editor, hint)
 								ed.Color = th.Pal.TextStrong

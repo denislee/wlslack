@@ -53,7 +53,7 @@ func (e *MessageEditor) Layout(gtx layout.Context, th *Theme) layout.Dimensions 
 	// key.EditEvent that Gio's window translates into EditorInsert, which
 	// advances the editor's IME selection by 1 rune and dispatches a
 	// key.SelectionEvent. widget.Editor applies that SelectionEvent
-	// unconditionally — even when ReadOnly — moving the caret forward on
+	// unconditionally -- even when ReadOnly -- moving the caret forward on
 	// every keypress. Discarding these events here keeps our SetCaret-based
 	// navigation authoritative. Draining FocusEvent doesn't unfocus the
 	// editor (router state is unchanged), so paintSelection still works.
@@ -86,9 +86,9 @@ func (e *MessageEditor) Layout(gtx layout.Context, th *Theme) layout.Dimensions 
 					return title.Layout(gtx)
 				}),
 				layout.Rigid(func(gtx layout.Context) layout.Dimensions {
-					hint := "h/j/k/l navigate · v visual · y copy · gg/G top/bottom · Esc close"
+					hint := "h/j/k/l navigate | v visual | y copy | gg/G top/bottom | Esc close"
 					if e.mode == modeVisual {
-						hint = "h/j/k/l select · y copy · Esc normal mode"
+						hint = "h/j/k/l select | y copy | Esc normal mode"
 					}
 					lbl := material.Caption(th.Mat, hint)
 					th.applyFont(&lbl, FontStyle{})
@@ -286,7 +286,7 @@ func (e *MessageEditor) HandleKey(gtx layout.Context, ev key.Event) bool {
 }
 
 // runes returns the editor text as a rune slice. Selection()/SetCaret() use
-// rune offsets, so all navigation must work in rune space — indexing the
+// rune offsets, so all navigation must work in rune space -- indexing the
 // string by byte drifts with every multi-byte character (emoji, accents).
 func (e *MessageEditor) runes() []rune {
 	return []rune(e.editor.Text())

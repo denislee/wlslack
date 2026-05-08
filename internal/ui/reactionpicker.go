@@ -300,7 +300,7 @@ func (r *ReactionPicker) Layout(gtx layout.Context, th *Theme) layout.Dimensions
 					return title.Layout(gtx)
 				}),
 				layout.Rigid(func(gtx layout.Context) layout.Dimensions {
-					hint := material.Caption(th.Mat, "type to filter · ↑/↓ select · Enter react · Esc cancel")
+					hint := material.Caption(th.Mat, "type to filter | ^/v select | Enter react | Esc cancel")
 					th.applyFont(&hint, FontStyle{})
 					hint.Color = th.Pal.TextMuted
 					return layout.Inset{Top: unit.Dp(4), Bottom: unit.Dp(12)}.Layout(gtx, hint.Layout)
@@ -309,7 +309,7 @@ func (r *ReactionPicker) Layout(gtx layout.Context, th *Theme) layout.Dimensions
 					return withBorder(gtx, th.Pal.BorderStrong, borders{Top: true, Right: true, Bottom: true, Left: true}, func(gtx layout.Context) layout.Dimensions {
 						return paintedBg(gtx, th.Pal.BgCode, func(gtx layout.Context) layout.Dimensions {
 							return layout.UniformInset(unit.Dp(10)).Layout(gtx, func(gtx layout.Context) layout.Dimensions {
-								ed := material.Editor(th.Mat, &r.editor, "Search emoji…")
+								ed := material.Editor(th.Mat, &r.editor, "Search emoji...")
 								ed.Color = th.Pal.TextStrong
 								ed.HintColor = th.Pal.TextMuted
 								ed.SelectionColor = WithAlpha(th.Pal.Selection, 0x66)

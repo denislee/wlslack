@@ -106,7 +106,7 @@ func (l *LinkPicker) Layout(gtx layout.Context, th *Theme) layout.Dimensions {
 					return title.Layout(gtx)
 				}),
 				layout.Rigid(func(gtx layout.Context) layout.Dimensions {
-					hint := material.Caption(th.Mat, "j/k or ↑/↓ select · Enter open · h/q/Esc cancel")
+					hint := material.Caption(th.Mat, "j/k or ^/v select | Enter open | h/q/Esc cancel")
 					th.applyFont(&hint, FontStyle{})
 					hint.Color = th.Pal.TextMuted
 					return layout.Inset{Top: unit.Dp(4), Bottom: unit.Dp(12)}.Layout(gtx, hint.Layout)

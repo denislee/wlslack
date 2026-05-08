@@ -43,7 +43,7 @@ type borders struct {
 
 // withBorder runs w, then draws 1dp lines on the requested edges of its
 // dimensions in c. Lines are drawn after w so they sit above any background
-// or content. Static — no animation.
+// or content. Static -- no animation.
 func withBorder(gtx layout.Context, c color.NRGBA, b borders, w layout.Widget) layout.Dimensions {
 	dims := w(gtx)
 	px := gtx.Dp(unit.Dp(1))

@@ -30,7 +30,7 @@ type ChannelsSidebar struct {
 	// either a channel (key == channel ID) or a group header (key ==
 	// headerKey(name)), so j/k can step through headers and let space/enter
 	// collapse them. activeID still tracks which channel's messages are
-	// shown — the two diverge whenever the cursor sits on a header.
+	// shown -- the two diverge whenever the cursor sits on a header.
 	cursorKey string
 
 	// favorites is the set of channel IDs the user has starred. Updates flow
@@ -218,7 +218,7 @@ func (s *ChannelsSidebar) PageSize() int {
 	return 1
 }
 
-// rowKey returns the cursor key for r — channel ID for channel rows,
+// rowKey returns the cursor key for r -- channel ID for channel rows,
 // headerKey(name) for header rows. Used to track keyboard cursor position
 // stably across rebuilds.
 func rowKeyFor(r *sidebarRow) string {
@@ -232,7 +232,7 @@ func rowKeyFor(r *sidebarRow) string {
 // channel and header rows. The list is scrolled so the new row stays
 // visible. Returns ("", false) when there are no rows yet, ("", true) when
 // the cursor lands on a header, and (channelID, true) when it lands on a
-// channel — callers should only switch the active channel in the third case.
+// channel -- callers should only switch the active channel in the third case.
 func (s *ChannelsSidebar) MoveSelection(delta int) (string, bool) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
@@ -353,7 +353,7 @@ func (s *ChannelsSidebar) rebuildRowsLocked() {
 
 	// Unread aggregates channels with unread messages from all conversation
 	// types so the user can scan them in one place. A channel only ever lives
-	// in one group — being unread takes priority over its category.
+	// in one group -- being unread takes priority over its category.
 	var unread, favs, channels, externals, dms, mpdms []slack.Channel
 	hasAnyUnread := false
 	for _, ch := range s.raw {
@@ -391,7 +391,7 @@ func (s *ChannelsSidebar) rebuildRowsLocked() {
 		sort.SliceStable(group, func(i, j int) bool {
 			ci, cj := group[i], group[j]
 			// Hidden channels only surface here when they have new activity, so
-			// float them to the top of the category — otherwise they'd be lost
+			// float them to the top of the category -- otherwise they'd be lost
 			// behind always-visible channels.
 			hi, hj := s.hidden[ci.ID], s.hidden[cj.ID]
 			if hi != hj {
@@ -556,9 +556,9 @@ func (s *ChannelsSidebar) Layout(gtx layout.Context, th *Theme, fm *slack.Format
 }
 
 func (s *ChannelsSidebar) layoutHeader(gtx layout.Context, th *Theme, r *sidebarRow) layout.Dimensions {
-	chevron := "▾ "
+	chevron := "v "
 	if r.collapsed {
-		chevron = "▸ "
+		chevron = "> "
 	}
 	s.mu.Lock()
 	selected := s.cursorKey == headerKey(r.headerKey)
@@ -740,9 +740,9 @@ func channelPrefix(ch slack.Channel) string {
 	case ch.IsMPIM:
 		return ""
 	case ch.IsExternal:
-		return "🌐 "
+		return "~ "
 	case ch.IsPrivate:
-		return "🔒 "
+		return "* "
 	default:
 		return "# "
 	}

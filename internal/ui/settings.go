@@ -105,21 +105,24 @@ func (s *SettingsScreen) Layout(gtx layout.Context) layout.Dimensions {
 	th := s.th
 	dirty := false
 
-	if s.toggleSidebar.Clicked(gtx) {
-		if th.ThemeSidebar == "dark" {
-			th.ThemeSidebar = "light"
-		} else {
-			th.ThemeSidebar = "dark"
+	cycleTheme := func(current string) string {
+		switch current {
+		case "dark":
+			return "light"
+		case "light":
+			return "linear"
+		default:
+			return "dark"
 		}
+	}
+
+	if s.toggleSidebar.Clicked(gtx) {
+		th.ThemeSidebar = cycleTheme(th.ThemeSidebar)
 		th.ApplyThemePrefs(th.ThemeSidebar, th.ThemeMain)
 		dirty = true
 	}
 	if s.toggleMain.Clicked(gtx) {
-		if th.ThemeMain == "dark" {
-			th.ThemeMain = "light"
-		} else {
-			th.ThemeMain = "dark"
-		}
+		th.ThemeMain = cycleTheme(th.ThemeMain)
 		th.ApplyThemePrefs(th.ThemeSidebar, th.ThemeMain)
 		dirty = true
 	}
@@ -194,7 +197,7 @@ func (s *SettingsScreen) Layout(gtx layout.Context) layout.Dimensions {
 				}),
 				layout.Rigid(layout.Spacer{Height: unit.Dp(10)}.Layout),
 				layout.Rigid(func(gtx layout.Context) layout.Dimensions {
-					hint := material.Caption(th.Mat, "Esc close · changes save automatically")
+					hint := material.Caption(th.Mat, "Esc close | changes save automatically")
 					hint.Color = th.Pal.TextMuted
 					return hint.Layout(gtx)
 				}),
@@ -343,7 +346,7 @@ func (s *SettingsScreen) layoutThemeToggles(gtx layout.Context, th *Theme) layou
 func (s *SettingsScreen) layoutHeader(gtx layout.Context, th *Theme) layout.Dimensions {
 	return layout.Flex{Alignment: layout.Middle}.Layout(gtx,
 		layout.Rigid(func(gtx layout.Context) layout.Dimensions {
-			lbl := material.H6(th.Mat, "Settings · Fonts")
+			lbl := material.H6(th.Mat, "Settings | Fonts")
 			th.applyFont(&lbl, FontStyle{})
 			lbl.Color = th.Pal.TextStrong
 			lbl.Font.Weight = font.Bold

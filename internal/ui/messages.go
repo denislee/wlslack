@@ -195,7 +195,7 @@ func (m *MessagesView) HasSelection() bool {
 // SelectedMessageURLs returns the links found on whichever message currently
 // has the keyboard highlight (thread row when in thread mode, otherwise the
 // channel-history row). Returns nil when nothing is selected. File URLs are
-// excluded — they need Slack auth and don't open in an external browser.
+// excluded -- they need Slack auth and don't open in an external browser.
 func (m *MessagesView) SelectedMessageURLs() []string {
 	m.mu.Lock()
 	msg := m.selectedMessageLocked()
@@ -295,8 +295,8 @@ func (m *MessagesView) OpenThread(channelID string) (string, string, bool) {
 	// keyboard target. SetThreadMessages preserves this selection by ts when
 	// the API result arrives.
 	m.threadSelected = 0
-	// Land at the top so the parent message — the one the user just drilled
-	// into — is the first thing they see, with replies trailing below.
+	// Land at the top so the parent message -- the one the user just drilled
+	// into -- is the first thing they see, with replies trailing below.
 	m.threadList.ScrollToEnd = false
 	m.threadList.Position = layout.Position{}
 	return channelID, ts, true
@@ -336,7 +336,7 @@ func (m *MessagesView) SetDeletePendingTS(ts string) {
 }
 
 // HasThreadSelection reports whether the thread list has a highlighted row
-// — used by the app to decide whether 'l' should drill into the author panel.
+// -- used by the app to decide whether 'l' should drill into the author panel.
 func (m *MessagesView) HasThreadSelection() bool {
 	m.mu.Lock()
 	defer m.mu.Unlock()
@@ -351,19 +351,19 @@ func (m *MessagesView) AuthorOpen() bool {
 }
 
 // OpenAuthor populates and shows the author panel for the currently selected
-// thread message. fm is consulted for the cached profile; missing profile data
+// message. fm is consulted for the cached profile; missing profile data
 // just yields a panel with whatever IDs we have on the message itself.
 func (m *MessagesView) OpenAuthor(fm *slack.Formatter) bool {
 	m.mu.Lock()
 	defer m.mu.Unlock()
-	if !m.threadActive || m.threadSelected < 0 || m.threadSelected >= len(m.threadRows) {
+	msg := m.selectedMessageLocked()
+	if msg == nil {
 		return false
 	}
-	r := m.threadRows[m.threadSelected]
-	candidates := []authorField{{"User ID", r.msg.UserID}}
+	candidates := []authorField{{"User ID", msg.UserID}}
 
 	// Add edit history if present
-	for i, h := range r.msg.EditHistory {
+	for i, h := range msg.EditHistory {
 		label := "Original"
 		if i > 0 {
 			label = fmt.Sprintf("Edit %d", i)
@@ -374,8 +374,8 @@ func (m *MessagesView) OpenAuthor(fm *slack.Formatter) bool {
 		})
 	}
 
-	avatar, displayName := "", r.msg.Username
-	if u := fm.GetUser(r.msg.UserID); u != nil {
+	avatar, displayName := "", msg.Username
+	if u := fm.GetUser(msg.UserID); u != nil {
 		candidates = append(candidates, []authorField{
 			{"Username", u.Name},
 			{"Display name", u.DisplayName},
@@ -406,7 +406,7 @@ func (m *MessagesView) OpenAuthor(fm *slack.Formatter) bool {
 		}
 	}
 	if len(out) == 0 {
-		out = []authorField{{"User ID", r.msg.UserID}}
+		out = []authorField{{"User ID", msg.UserID}}
 	}
 	m.authorRows = out
 	m.authorSelected = 0
@@ -465,7 +465,7 @@ func (m *MessagesView) AuthorSelectedValue() (string, bool) {
 }
 
 // SetThreadMessages replaces the thread row set. The slack API returns the
-// parent first followed by replies — we render the whole sequence so the
+// parent first followed by replies -- we render the whole sequence so the
 // reader sees the original message above the conversation.
 func (m *MessagesView) SetThreadMessages(msgs []slack.Message) {
 	m.mu.Lock()
@@ -524,7 +524,7 @@ func moveSelectionLocked(selected *int, rows []*messageRow, list *widget.List, d
 	}
 	idx := *selected
 	if idx < 0 {
-		// First press from no selection lands on the most recent message —
+		// First press from no selection lands on the most recent message --
 		// the user is staring at the bottom of the chat, so put the cursor
 		// where their eyes already are. From there, k walks back through
 		// history.
@@ -712,7 +712,7 @@ func (m *MessagesView) layoutAuthor(gtx layout.Context, th *Theme) layout.Dimens
 			}
 			children = append(children, layout.Rigid(layout.Spacer{Height: unit.Dp(10)}.Layout))
 			children = append(children, layout.Rigid(func(gtx layout.Context) layout.Dimensions {
-				lbl := material.Caption(th.Mat, "j/k navigate · y copy · h close")
+				lbl := material.Caption(th.Mat, "j/k navigate | y copy | h close")
 				th.applyFont(&lbl, FontStyle{})
 				lbl.Color = th.Pal.TextMuted
 				return lbl.Layout(gtx)
@@ -806,7 +806,7 @@ func (m *MessagesView) layoutHeaderLocked(gtx layout.Context, th *Theme) layout.
 	title := "# " + m.header
 	subtitle := m.topic
 	if m.threadActive {
-		title = "↳ Thread in #" + m.header
+		title = "-> Thread in #" + m.header
 		subtitle = "press h to return to #" + m.header
 	}
 	return withBorder(gtx, th.Pal.Border, borders{Bottom: true}, func(gtx layout.Context) layout.Dimensions {
@@ -1199,7 +1199,7 @@ func (m *MessagesView) layoutFiles(gtx layout.Context, th *Theme, files []slack.
 			}
 			first = false
 			children = append(children, layout.Rigid(func(gtx layout.Context) layout.Dimensions {
-				lbl := material.Caption(th.Mat, "📎 "+f.Name)
+				lbl := material.Caption(th.Mat, "[FILE] "+f.Name)
 				lbl.Color = th.Pal.TextDim
 				return lbl.Layout(gtx)
 			}))
@@ -1230,12 +1230,12 @@ func (m *MessagesView) layoutImage(gtx layout.Context, th *Theme, f slack.File, 
 
 	op, hasOp, done := m.images.GetOp(url)
 	if !done {
-		lbl := material.Caption(th.Mat, "🖼  loading "+f.Name+"…")
+		lbl := material.Caption(th.Mat, "[IMG] loading "+f.Name+"...")
 		lbl.Color = th.Pal.TextDim
 		return lbl.Layout(gtx)
 	}
 	if !hasOp {
-		lbl := material.Caption(th.Mat, "🖼  "+f.Name+" (failed to load)")
+		lbl := material.Caption(th.Mat, "[IMG] "+f.Name+" (failed to load)")
 		lbl.Color = th.Pal.TextDim
 		return lbl.Layout(gtx)
 	}
@@ -1373,7 +1373,7 @@ func (m *MessagesView) layoutThreadBadge(gtx layout.Context, th *Theme, fm *slac
 			layout.Rigid(func(gtx layout.Context) layout.Dimensions {
 				text := fmt.Sprintf("%d %s", msg.ReplyCount, noun)
 				if age != "" {
-					text += " • last " + age
+					text += " * last " + age
 				}
 				lbl := material.Body2(th.Mat, text)
 				lbl.Color = th.Pal.Accent
@@ -1505,10 +1505,10 @@ func toRichSpan(s slack.Span, th *Theme) richtext.SpanStyle {
 		out.Color = th.Pal.Production
 	case s.Style&slack.StyleResolved != 0:
 		out.Color = th.Pal.Resolved
-		out.Content = "● " + out.Content
+		out.Content = "* " + out.Content
 	case s.Style&slack.StyleFiring != 0:
 		out.Color = th.Pal.Firing
-		out.Content = "● " + out.Content
+		out.Content = "* " + out.Content
 	case s.Style&slack.StyleMention != 0:
 		out.Color = th.Pal.Mention
 		out.Font.Weight = font.Bold

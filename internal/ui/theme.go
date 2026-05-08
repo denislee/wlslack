@@ -112,6 +112,38 @@ func lightPalette() Palette {
 	}
 }
 
+func linearPalette() Palette {
+	return Palette{
+		Bg:            rgb(0x141417),
+		BgSidebar:     rgb(0x1b1b20),
+		BgHeader:      rgb(0x141417),
+		BgComposer:    rgb(0x141417),
+		BgCode:        rgb(0x1b1b20),
+		BgRowAlt:      rgb(0x232329),
+		BgRowSelected: rgb(0x5d4399),
+		Text:          rgb(0xededed),
+		TextStrong:    rgb(0xffffff),
+		TextDim:       rgb(0xaaaaaa),
+		TextMuted:     rgb(0x666666),
+		Accent:        rgb(0x7d56f4),
+		AccentText:    rgb(0xffffff),
+		Mention:       rgb(0xa885ff),
+		Link:          rgb(0xa885ff),
+		Unread:        rgb(0xaaaaaa),
+		UnreadBadge:   rgb(0x666666),
+		MentionBadge:  rgb(0xeb5757),
+		Border:        rgb(0x2c2c33),
+		BorderStrong:  rgb(0x4a3d80),
+		Staging:       rgb(0x6cb1ff),
+		Production:    rgb(0xff9f3a),
+		Resolved:      rgb(0x4ade80),
+		Firing:        rgb(0xeb5757),
+		PresenceActive: rgb(0x4ade80),
+		PresenceAway:   rgb(0x666666),
+		Selection:     rgb(0x5d4399),
+	}
+}
+
 // FontStyle is the per-section typeface + size used when rendering labels.
 // Face "" or Size 0 means "fall back to the theme default".
 type FontStyle struct {
@@ -312,15 +344,21 @@ func (t *Theme) ApplyThemePrefs(sidebarTheme, mainTheme string) {
 		t.ThemeMain = mainTheme
 	}
 
-	if t.ThemeSidebar == "light" {
+	switch t.ThemeSidebar {
+	case "light":
 		t.SidebarPal = lightPalette()
-	} else {
+	case "linear":
+		t.SidebarPal = linearPalette()
+	default:
 		t.SidebarPal = darkPalette()
 	}
 
-	if t.ThemeMain == "light" {
+	switch t.ThemeMain {
+	case "light":
 		t.Pal = lightPalette()
-	} else {
+	case "linear":
+		t.Pal = linearPalette()
+	default:
 		t.Pal = darkPalette()
 	}
 
@@ -347,7 +385,7 @@ type sectionPrefs struct {
 
 // uniqueFaces collapses the loaded font collection into a sorted, deduplicated
 // list of typeface names. monoFaces is the subset whose name contains "mono"
-// (case-insensitive) — handy for the Code section dropdown.
+// (case-insensitive) -- handy for the Code section dropdown.
 func uniqueFaces(coll []font.FontFace) (faces []string, mono []string) {
 	seen := map[string]bool{}
 	for _, f := range coll {
@@ -386,15 +424,52 @@ func loadSystemFaces() []font.FontFace {
 		"/usr/share/fonts/truetype/inter/Inter-Regular.ttf",
 		"/usr/share/fonts/truetype/inter/Inter-Bold.ttf",
 		"/usr/share/fonts/truetype/inter/Inter-Italic.ttf",
+		// Noto Sans & Serif
+		"/usr/share/fonts/noto/NotoSans-Regular.ttf",
+		"/usr/share/fonts/noto/NotoSans-Bold.ttf",
+		"/usr/share/fonts/noto/NotoSans-Italic.ttf",
+		"/usr/share/fonts/noto/NotoSansMono-Regular.ttf",
+		"/usr/share/fonts/noto/NotoSansMono-Bold.ttf",
+		"/usr/share/fonts/noto/NotoSerif-Regular.ttf",
+		"/usr/share/fonts/noto/NotoSerif-Bold.ttf",
+		"/usr/share/fonts/noto/NotoSerif-Italic.ttf",
+		// Liberation Sans & Serif
+		"/usr/share/fonts/liberation/LiberationSans-Regular.ttf",
+		"/usr/share/fonts/liberation/LiberationSans-Bold.ttf",
+		"/usr/share/fonts/liberation/LiberationSans-Italic.ttf",
+		"/usr/share/fonts/liberation/LiberationMono-Regular.ttf",
+		"/usr/share/fonts/liberation/LiberationMono-Bold.ttf",
+		"/usr/share/fonts/liberation/LiberationSerif-Regular.ttf",
+		"/usr/share/fonts/liberation/LiberationSerif-Bold.ttf",
+		// Adwaita Sans
+		"/usr/share/fonts/Adwaita/AdwaitaSans-Regular.ttf",
+		"/usr/share/fonts/Adwaita/AdwaitaSans-Italic.ttf",
+		"/usr/share/fonts/Adwaita/AdwaitaMono-Regular.ttf",
+		"/usr/share/fonts/Adwaita/AdwaitaMono-Bold.ttf",
+		// DejaVu
+		"/usr/share/fonts/TTF/DejaVuSans.ttf",
+		"/usr/share/fonts/TTF/DejaVuSans-Bold.ttf",
+		"/usr/share/fonts/TTF/DejaVuSansMono.ttf",
+		"/usr/share/fonts/TTF/DejaVuSansMono-Bold.ttf",
+		"/usr/share/fonts/TTF/DejaVuSerif.ttf",
+		"/usr/share/fonts/TTF/DejaVuSerif-Bold.ttf",
+		// Nanum
+		"/usr/share/fonts/TTF/NanumGothic.ttf",
+		"/usr/share/fonts/TTF/NanumGothicBold.ttf",
+		"/usr/share/fonts/TTF/NanumBarunGothic.ttf",
+		"/usr/share/fonts/TTF/NanumBarunGothicBold.ttf",
+		"/usr/share/fonts/TTF/NanumGothicCoding.ttf",
 		// IBM Plex Sans
 		"/usr/share/fonts/ibm-plex/IBMPlexSans-Regular.otf",
 		"/usr/share/fonts/ibm-plex/IBMPlexSans-Bold.otf",
 		"/usr/share/fonts/ibm-plex/IBMPlexSans-Italic.otf",
 		"/usr/share/fonts/TTF/IBMPlexSans-Regular.ttf",
-		// JetBrains Mono
+		// JetBrains Mono & Nerd Fonts
 		"/usr/share/fonts/jetbrains-mono/JetBrainsMono-Regular.ttf",
 		"/usr/share/fonts/TTF/JetBrainsMono-Regular.ttf",
 		"/usr/share/fonts/truetype/jetbrains-mono/JetBrainsMono-Regular.ttf",
+		"/usr/share/fonts/TTF/JetBrainsMonoNLNerdFont-Regular.ttf",
+		"/usr/share/fonts/TTF/JetBrainsMonoNLNerdFontMono-Regular.ttf",
 		// IBM Plex Mono fallback
 		"/usr/share/fonts/ibm-plex/IBMPlexMono-Regular.otf",
 	}

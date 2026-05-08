@@ -40,7 +40,7 @@ func (v *ImageViewer) SetFiles(files []slack.File) {
 	}
 }
 
-// MoveSelection shifts the current image. Wraps at neither end — the user has
+// MoveSelection shifts the current image. Wraps at neither end -- the user has
 // to press Esc to leave the viewer.
 func (v *ImageViewer) MoveSelection(delta int) {
 	if len(v.files) == 0 {
@@ -94,7 +94,7 @@ func (v *ImageViewer) layoutImage(gtx layout.Context, th *Theme, f slack.File) l
 
 	op, hasOp, done := v.images.GetOp(url)
 	if !done {
-		lbl := material.Body2(th.Mat, "loading "+f.Name+"…")
+		lbl := material.Body2(th.Mat, "loading "+f.Name+"...")
 		th.applyFont(&lbl, FontStyle{})
 		lbl.Color = th.Pal.TextDim
 		return lbl.Layout(gtx)
@@ -189,7 +189,7 @@ func (v *ImageViewer) layoutGif(gtx layout.Context, th *Theme, g *gif.GIF) layou
 func (v *ImageViewer) layoutFooter(gtx layout.Context, th *Theme, f slack.File) layout.Dimensions {
 	hint := "Esc close"
 	if v.HasMultiple() {
-		hint = "j/k or ←/→ navigate · Esc close"
+		hint = "j/k or </> navigate | Esc close"
 	}
 	caption := fmt.Sprintf("%d / %d  %s", v.idx+1, len(v.files), f.Name)
 	return layout.Flex{Axis: layout.Vertical, Alignment: layout.Middle}.Layout(gtx,

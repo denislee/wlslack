@@ -143,7 +143,7 @@ func (c *Composer) Layout(gtx layout.Context, th *Theme, fm *slack.Formatter, pl
 														return lbl.Layout(gtx)
 													}),
 													layout.Rigid(func(gtx layout.Context) layout.Dimensions {
-														btn := material.Button(th.Mat, &c.removeBtns[i], "×")
+														btn := material.Button(th.Mat, &c.removeBtns[i], "x")
 														btn.Background = color.NRGBA{}
 														btn.Color = th.Pal.TextDim
 														btn.Inset = layout.UniformInset(unit.Dp(2))

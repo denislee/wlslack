@@ -63,7 +63,7 @@ type App struct {
 	viewingContext bool
 
 	// keyTag is the focus target for app-level shortcuts (j/k navigation).
-	// Bare struct{} is fine — we only use its address.
+	// Bare struct{} is fine -- we only use its address.
 	keyTag           struct{}
 	composerPasteTag struct{}
 
@@ -359,7 +359,7 @@ func (a *App) layout(gtx layout.Context) layout.Dimensions {
 
 					// Auto-hide the composer when blurred. composerVisible is flipped
 					// on 'i' (to bring it back) and cleared once focus has actually
-					// left the editor — checked via gtx.Source.Focused below.
+					// left the editor -- checked via gtx.Source.Focused below.
 					if a.composerVisible && !gtx.Source.Focused(&a.composer.editor) && a.initFocused {
 						// Defer the hide by one frame after focus is dispatched: on
 						// the very first 'i' press, composerVisible is set during the
@@ -951,8 +951,16 @@ func (a *App) handleKeys(gtx layout.Context) {
 		case kev.Name == "B" && kev.Modifiers.Contain(key.ModCtrl):
 			a.pageInPane(-1)
 		case kev.Name == "H":
-			// h peels back one layer at a time: link picker → author panel →
-			// thread → channels-pane focus. This keeps h/l symmetrical with the
+			if kev.Modifiers.Contain(key.ModShift) {
+				if a.focusPane == paneMessages {
+					if a.messages.OpenAuthor(a.fmt) {
+						a.w.Invalidate()
+					}
+				}
+				break
+			}
+			// h peels back one layer at a time: link picker > author panel >
+			// thread > channels-pane focus. This keeps h/l symmetrical with the
 			// l-to-drill-in progression.
 			switch {
 			case a.linkPickerOpen:
@@ -970,8 +978,8 @@ func (a *App) handleKeys(gtx layout.Context) {
 
 		case kev.Name == "L":
 			// Drill-in progression on the messages pane:
-			//   channel-history selection → thread view
-			//   thread selection         → author detail panel
+			//   channel-history selection > thread view
+			//   thread selection         > author detail panel
 			// Without a selection, l just moves focus to the messages pane.
 			switch {
 			case a.focusPane == paneMessages && a.messages.HasThreadSelection():
@@ -1098,10 +1106,10 @@ func (a *App) onSwitcherSearch(query string) {
 }
 
 // openSelectedLinks runs Enter on the highlighted message. Resolution order:
-//   - 1 link → open in browser
-//   - >1 links → link picker
-//   - 0 links and >1 images → in-app image viewer
-//   - everything else → no-op (single inline image already shows in the row)
+//   - 1 link > open in browser
+//   - >1 links > link picker
+//   - 0 links and >1 images > in-app image viewer
+//   - everything else > no-op (single inline image already shows in the row)
 func (a *App) openSelectedLinks() {
 	urls := a.messages.SelectedMessageURLs()
 	switch len(urls) {
@@ -1411,7 +1419,7 @@ func (a *App) deleteMessage(ch, ts string) {
 }
 
 // openURL hands a URL to the system browser via xdg-open. Errors are logged
-// but not surfaced — the user just sees no browser pop, which is consistent
+// but not surfaced -- the user just sees no browser pop, which is consistent
 // with how desktop launchers usually behave.
 func openURL(url string) {
 	if url == "" {
@@ -1472,7 +1480,7 @@ func (a *App) onFontsChanged() {
 	a.w.Invalidate()
 }
 
-// prefsFromState bridges config.FontPrefs → ui sectionPrefs without making
+// prefsFromState bridges config.FontPrefs > ui sectionPrefs without making
 // the ui package import a runtime dependency on the JSON struct shape.
 func prefsFromState(p config.FontPrefs) sectionPrefs {
 	conv := func(f config.FontPref) FontStyle { return FontStyle{Face: f.Face, Size: f.Size} }
@@ -1507,7 +1515,7 @@ func stateFromTheme(th *Theme) config.FontPrefs {
 }
 
 // moveInPane dispatches j/k to whichever pane has logical focus. The author
-// panel takes priority — when it's open, j/k walks the field list rather than
+// panel takes priority -- when it's open, j/k walks the field list rather than
 // the underlying message rows.
 func (a *App) moveInPane(delta int) {
 	if a.messages.AuthorOpen() {
@@ -1723,7 +1731,7 @@ func (a *App) fetchThread(channelID, threadTS string) {
 		return
 	}
 	// Drop the result if the user has since closed the thread or moved to a
-	// different one — otherwise we'd silently overwrite their current view.
+	// different one -- otherwise we'd silently overwrite their current view.
 	if !a.messages.InThread() {
 		return
 	}
