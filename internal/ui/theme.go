@@ -191,6 +191,7 @@ type Theme struct {
 
 	ShowOnlyRecentChannels bool
 	HideEmptyChannels      bool
+	ShowUnreadOnCollapse   bool
 	ShowStatusBar          bool
 	DisableLinkUnfurl      bool
 	DisableMediaUnfurl     bool
@@ -244,7 +245,8 @@ func newTheme() *Theme {
 			Composer: uiDefault,
 			Code:     monoDefault,
 		},
-		ShowStatusBar: true,
+		ShowStatusBar:        true,
+		ShowUnreadOnCollapse: true,
 	}
 }
 

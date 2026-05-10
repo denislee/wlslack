@@ -219,16 +219,43 @@ func (r *ReactionPicker) refilter() {
 
 	out := r.rows[:0]
 
-	existingMap := make(map[string]bool)
+	catalogByName := make(map[string]slack.EmojiEntry, len(all))
+	for _, e := range all {
+		catalogByName[e.Name] = e
+	}
+
+	existingMap := make(map[string]bool, len(existing))
 	for _, name := range existing {
 		existingMap[name] = true
 	}
 
-	for _, e := range all {
-		if existingMap[e.Name] {
-			if query == "" || strings.Contains(e.Name, query) {
-				out = append(out, &reactionRow{entry: e, reactors: reactorMap[e.Name]})
+	// Emit existing reactions first, in the order they appear on the message.
+	// Look up the glyph from the catalog; fall back to stripping the
+	// ::skin-tone-N modifier (Slack reports +1::skin-tone-2 etc. as a single
+	// reaction name) and finally to a literal :name: text glyph for custom
+	// emoji that haven't loaded into the catalog yet. Without this, reactions
+	// whose names don't match the catalog are silently dropped, so the user
+	// can't see who reacted with them.
+	emitted := make(map[string]bool, len(existing))
+	for _, name := range existing {
+		if emitted[name] {
+			continue
+		}
+		emitted[name] = true
+		entry, ok := catalogByName[name]
+		if !ok {
+			if base, _, found := strings.Cut(name, "::"); found {
+				if be, bok := catalogByName[base]; bok {
+					entry = slack.EmojiEntry{Name: name, Glyph: be.Glyph}
+					ok = true
+				}
 			}
+		}
+		if !ok {
+			entry = slack.EmojiEntry{Name: name, Glyph: ":" + name + ":"}
+		}
+		if query == "" || strings.Contains(entry.Name, query) {
+			out = append(out, &reactionRow{entry: entry, reactors: reactorMap[name]})
 		}
 	}
 

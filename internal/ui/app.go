@@ -112,7 +112,13 @@ type App struct {
 	pendingG bool
 
 	lastFullUnreadRefresh time.Time
-	lastPriorityRefresh   time.Time
+	// rotatingScanIdx walks the channel list one slice at a time on each
+	// priority tick. Combined with the priority set (pinned/active/recent),
+	// this gives every channel a refresh within a few minutes without
+	// blocking on a giant full sweep.
+	rotatingScanIdx int
+
+	fetchingUnreads atomic.Bool
 
 	// sidebarPublish coalesces sidebar updates so multiple concurrent
 	// cache mutations (priority tick, mention scans, active-channel poll)
@@ -151,6 +157,7 @@ func Run(client *slack.Client, cfg *config.Config) error {
 	a.th.ApplyThemePrefs(state.ThemeSidebar, state.ThemeMain)
 	a.th.ShowOnlyRecentChannels = state.ShowOnlyRecentChannels
 	a.th.HideEmptyChannels = state.HideEmptyChannels
+	a.th.ShowUnreadOnCollapse = state.ShowUnreadOnCollapse
 	a.th.ShowStatusBar = state.ShowStatusBar
 	a.th.DisableLinkUnfurl = state.DisableLinkUnfurl
 	a.th.DisableMediaUnfurl = state.DisableMediaUnfurl
@@ -174,6 +181,7 @@ func Run(client *slack.Client, cfg *config.Config) error {
 	go a.pollActiveChannel()
 	go a.pollEmojis()
 	go a.pollPresence()
+	a.client.Cache().OnUpdate = a.requestSidebarPublish
 	go a.runSidebarPublisher()
 
 	return a.loop()
@@ -1390,6 +1398,7 @@ func (a *App) onFontsChanged() {
 	state.ThemeMain = a.th.ThemeMain
 	state.ShowOnlyRecentChannels = a.th.ShowOnlyRecentChannels
 	state.HideEmptyChannels = a.th.HideEmptyChannels
+	state.ShowUnreadOnCollapse = a.th.ShowUnreadOnCollapse
 	state.ShowStatusBar = a.th.ShowStatusBar
 	state.DisableLinkUnfurl = a.th.DisableLinkUnfurl
 	state.DisableMediaUnfurl = a.th.DisableMediaUnfurl
@@ -1517,7 +1526,16 @@ func (a *App) onChannelSelectWithContext(id string, ts string) {
 		a.messages.SetHeader("Mentions", "Consolidated view of all unread messages with mentions")
 		a.messages.SetMessages(nil)
 		a.w.Invalidate()
-		go a.fetchAllUnreads()
+
+		priority := make([]string, 0, len(a.cfg.Channels.Pinned)+len(a.cfg.Channels.Hidden))
+		priority = append(priority, a.cfg.Channels.Pinned...)
+		priority = append(priority, a.cfg.Channels.Hidden...)
+		for _, ch := range a.client.Cache().GetAllChannels() {
+			if ch.UnreadCount > 0 {
+				priority = append(priority, ch.ID)
+			}
+		}
+		go a.scanUnreads(priority)
 		return
 	}
 	if id == "__THREADS__" {
@@ -1530,10 +1548,6 @@ func (a *App) onChannelSelectWithContext(id string, ts string) {
 	if ch := a.client.Cache().GetChannel(id); ch != nil {
 		a.messages.SetHeader(ch.Name, ch.Topic)
 		if ch.UnreadCount > 0 && ch.LatestTS != "" {
-			// Optimistically clear the unread count in cache
-			a.client.Cache().SetChannelUnread(ch.ID, 0, 0, ch.LatestTS, ch.LatestTS)
-			a.requestSidebarPublish()
-
 			go func(channelID, latestTS string) {
 				if err := a.client.MarkChannel(channelID, latestTS); err != nil {
 					slog.Debug("MarkChannel failed", "channel", channelID, "error", err)
@@ -1786,9 +1800,11 @@ func (a *App) pollChannels() {
 	tick := func() {
 		a.startTask("channels", "Syncing channels")
 		defer a.endTask("channels")
-		priority := make([]string, 0, len(a.cfg.Channels.Pinned)+len(a.cfg.Channels.Hidden))
+		favs := a.channels.Favorites()
+		priority := make([]string, 0, len(a.cfg.Channels.Pinned)+len(a.cfg.Channels.Hidden)+len(favs))
 		priority = append(priority, a.cfg.Channels.Pinned...)
 		priority = append(priority, a.cfg.Channels.Hidden...)
+		priority = append(priority, favs...)
 		channels, err := a.client.GetChannels(a.cfg.Channels.Types, priority)
 		if err != nil {
 			slog.Error("GetChannels failed", "error", err)
@@ -1818,120 +1834,243 @@ func (a *App) pollChannels() {
 		case <-t.C:
 			tick()
 		case <-pt.C:
-			// Refresh unread counts for priority channels
-			activeID := a.getActiveID()
-			priority := make([]string, 0, len(a.cfg.Channels.Pinned)+len(a.cfg.Channels.Hidden)+2)
-
-			now := time.Now()
-			isAggregate := activeID == "__UNREADS__" || activeID == "__THREADS__"
-			// conversations.list does not return per-channel `latest`, so without
-			// a periodic full scan a brand-new message in a channel that's not
-			// pinned/hidden/active and has no prior unreads will go undetected
-			// until the app is restarted. Force a full scan every 30s so new
-			// activity surfaces in the sidebar within that window.
-			fullDue := now.Sub(a.lastFullUnreadRefresh) >= 30*time.Second
-			isFullCheck := isAggregate || fullDue
-
-			if isAggregate && !fullDue {
-				// Aggregate views always need a full scan; if we just did one,
-				// wait for the rate limit to clear rather than running a partial
-				// scan that would leave the aggregate view stale.
+			if a.client.IsClientCountsSupported() {
+				go a.refreshUnreadsAggregate()
 				continue
 			}
 
-			if isFullCheck {
-				a.lastFullUnreadRefresh = now
-				for _, ch := range a.client.Cache().GetAllChannels() {
-					priority = append(priority, ch.ID)
-				}
-			} else {
-				a.lastPriorityRefresh = now
+			// Per-channel fallback (xoxp/xoxb without users.counts). Tier 3
+			// limits us to ~50 conversations.info calls per minute, so we
+			// build a small set per tick:
+			//   - the obvious priority set (pinned/hidden/favorites/active/
+			//     already-unread/last-hour-active)
+			//   - plus a rolling slice of the workspace, so quiet channels
+			//     get refreshed in a steady cycle instead of one giant sweep
+			//     that monopolises the lock for minutes.
+			activeID := a.getActiveID()
+			now := time.Now()
 
-				priority = append(priority, a.cfg.Channels.Pinned...)
-				priority = append(priority, a.cfg.Channels.Hidden...)
-				if activeID != "" {
-					priority = append(priority, activeID)
+			seen := make(map[string]bool)
+			priority := make([]string, 0, 64)
+			add := func(id string) {
+				if id == "" || seen[id] {
+					return
 				}
-				// Include channels that currently have unreads so they stay accurate
-				for _, ch := range a.client.Cache().GetAllChannels() {
-					if ch.UnreadCount > 0 {
-						priority = append(priority, ch.ID)
-					}
+				seen[id] = true
+				priority = append(priority, id)
+			}
+
+			for _, id := range a.cfg.Channels.Pinned {
+				add(id)
+			}
+			for _, id := range a.cfg.Channels.Hidden {
+				add(id)
+			}
+			for _, id := range a.channels.Favorites() {
+				add(id)
+			}
+			add(activeID)
+			recentCutoff := fmt.Sprintf("%d.000000", now.Add(-1*time.Hour).Unix())
+			all := a.client.Cache().GetAllChannels()
+			for _, ch := range all {
+				if ch.UnreadCount > 0 || (ch.LatestTS != "" && ch.LatestTS >= recentCutoff) {
+					add(ch.ID)
 				}
 			}
 
+			// Rolling slice through the rest of the workspace. windowSize is
+			// sized so the scan finishes well within the 5s tick under Tier 3
+			// limits — at ~50 calls/min sustained, 10 channels takes ~12s with
+			// retries, but most aren't rate-limited so the typical case is
+			// 2–3s. Workspace cycle time = len(all)/windowSize * 5s.
+			const windowSize = 10
+			rotated := 0
+			for i := 0; i < len(all) && rotated < windowSize; i++ {
+				idx := (a.rotatingScanIdx + i) % len(all)
+				if !seen[all[idx].ID] {
+					add(all[idx].ID)
+					rotated++
+				}
+			}
+			if len(all) > 0 {
+				a.rotatingScanIdx = (a.rotatingScanIdx + windowSize) % len(all)
+			}
+
+			slog.Info("priority tick", "channels", len(priority), "rotated", rotated, "total_workspace", len(all))
 			if len(priority) > 0 {
-				go func(ids []string, full bool) {
-					a.startTask("priority", "Updating unreads")
-					defer a.endTask("priority")
-					channels, err := a.client.GetUnreadCounts(ids)
-					if err != nil {
-						slog.Debug("GetUnreadCounts failed", "error", err)
-						return
-					}
-
-					// Perform background mention scan for any channel that has unreads
-					var scanWg sync.WaitGroup
-					sem := make(chan struct{}, 5) // limit concurrency to avoid rate limits
-					selfID := a.client.GetSelfID()
-					groups := a.client.Cache().GetAllUserGroups()
-
-					for _, ch := range channels {
-						if ch.UnreadCount > 0 {
-							scanWg.Add(1)
-							go func(ch slack.Channel) {
-								defer scanWg.Done()
-								sem <- struct{}{}
-								defer func() { <-sem }()
-
-								msgs, err := a.client.GetMessages(ch.ID, 50, ch.LastReadTS)
-								if err == nil {
-									mentions := 0
-									isDM := ch.IsIM || ch.IsMPIM
-									for _, m := range msgs {
-										if a.isMentionWithContext(m, selfID, groups) {
-											mentions++
-										}
-									}
-									if cached := a.client.Cache().GetChannel(ch.ID); cached != nil {
-										if isDM {
-											// In DMs, every unread message (including threads) is a mention.
-											mentions = ch.UnreadCount
-										}
-										if cached.MentionCount != mentions {
-											a.client.Cache().SetChannelUnread(ch.ID, ch.UnreadCount, mentions, ch.LastReadTS, ch.LatestTS)
-											a.w.Invalidate()
-										}
-									}
-								}
-							}(ch)
-						}
-					}
-					scanWg.Wait()
-
-					// Coalesce the sidebar republish with any concurrent
-					// updates (active-channel poll, mention scans) so the
-					// user sees one final ordering instead of intermediate
-					// states that re-sort and snap back.
-					a.requestSidebarPublish()
-
-					// If we're in the aggregate views, trigger a full refresh of the message list
-					// but only if we just did a full scan or if the active view is empty.
-					if a.getActiveID() == "__UNREADS__" {
-						go a.fetchAllUnreads()
-					} else if a.getActiveID() == "__THREADS__" {
-						go a.fetchAllThreads()
-					}
-				}(priority, isFullCheck)
+				go a.scanUnreads(priority)
 			}
 		}
 	}
+}
+
+func (a *App) scanUnreads(ids []string) {
+	if a.fetchingUnreads.Swap(true) {
+		slog.Info("scanUnreads skipped (busy)", "requested", len(ids))
+		return
+	}
+	defer a.fetchingUnreads.Store(false)
+
+	a.startTask("priority", "Updating unreads")
+	defer a.endTask("priority")
+
+	start := time.Now()
+	slog.Info("scanUnreads start", "channels", len(ids))
+	channels, err := a.client.GetUnreadCounts(ids)
+	if err != nil {
+		slog.Warn("GetUnreadCounts failed", "error", err)
+		return
+	}
+	withUnread := 0
+	for _, ch := range channels {
+		if ch.UnreadCount > 0 {
+			withUnread++
+		}
+	}
+	slog.Info("scanUnreads done", "requested", len(ids), "got", len(channels), "with_unread", withUnread, "elapsed", time.Since(start).String())
+
+	a.scanMentions(channels)
+	a.requestSidebarPublish()
+
+	switch a.getActiveID() {
+	case "__UNREADS__":
+		a.fetchAllUnreads()
+	case "__THREADS__":
+		go a.fetchAllThreads()
+	}
+}
+
+// refreshUnreadsAggregate is the xoxc-only fast path: one client.counts call
+// updates unread/mention state for every cached channel, then a per-channel
+// mention scan runs only on those that have unreads to keep the red-badge
+// counts accurate. This replaces the slow per-channel conversations.info
+// rotation when it's available.
+func (a *App) refreshUnreadsAggregate() {
+	if a.fetchingUnreads.Swap(true) {
+		return
+	}
+	defer a.fetchingUnreads.Store(false)
+
+	a.startTask("priority", "Updating unreads")
+	defer a.endTask("priority")
+
+	counts, err := a.client.GetClientCounts()
+	if err != nil {
+		slog.Warn("client.counts failed, will retry next tick", "error", err)
+		return
+	}
+	a.client.ApplyClientCounts(counts)
+	applied := 0
+	for _, ch := range a.client.Cache().GetAllChannels() {
+		if ch.UnreadCount > 0 {
+			applied++
+		}
+	}
+	slog.Info("client.counts applied", "fetched", len(counts), "now_unread", applied)
+
+	unread := make([]slack.Channel, 0)
+	for _, ch := range a.client.Cache().GetAllChannels() {
+		if ch.UnreadCount > 0 {
+			unread = append(unread, ch)
+		}
+	}
+	a.scanMentions(unread)
+	a.requestSidebarPublish()
+
+	switch a.getActiveID() {
+	case "__UNREADS__":
+		a.fetchAllUnreads()
+	case "__THREADS__":
+		go a.fetchAllThreads()
+	}
+}
+
+// scanMentions fetches recent messages for every channel that has unreads and
+// recomputes the mention badge from message text. Slack's aggregate counts
+// don't always agree with our per-message detection (group mentions, @here
+// scoping rules, etc.), so we always overwrite with the locally-computed
+// value to keep the badge consistent with the Mentions view.
+func (a *App) scanMentions(channels []slack.Channel) {
+	var wg sync.WaitGroup
+	sem := make(chan struct{}, 5)
+	selfID := a.client.GetSelfID()
+	groups := a.client.Cache().GetAllUserGroups()
+
+	for _, ch := range channels {
+		if ch.UnreadCount == 0 {
+			continue
+		}
+		wg.Add(1)
+		go func(ch slack.Channel) {
+			defer wg.Done()
+			sem <- struct{}{}
+			defer func() { <-sem }()
+
+			limit := 50
+			if a.getActiveID() == "__UNREADS__" {
+				limit = 100
+			}
+
+			msgs, err := a.client.GetMessages(ch.ID, limit, ch.LastReadTS)
+			if err != nil {
+				return
+			}
+			localUnread := 0
+			mentions := 0
+			isDM := ch.IsIM || ch.IsMPIM
+			for _, m := range msgs {
+				if ch.LastReadTS != "" && m.Timestamp <= ch.LastReadTS {
+					continue
+				}
+				localUnread++
+				if a.isMentionWithContext(m, selfID, groups) {
+					mentions++
+				}
+			}
+			cached := a.client.Cache().GetChannel(ch.ID)
+			if cached == nil {
+				return
+			}
+			// client.counts only returns has_unreads (boolean), so ApplyClientCounts
+			// pins UnreadCount at 1 as a placeholder. Refine it with the locally
+			// counted messages newer than LastReadTS — this is the same window
+			// scanMentions already fetches, so no extra API calls. Trust the
+			// higher of (cached, local) so a precise count from conversations.info
+			// (xoxp/xoxb path, possibly larger than our limit) isn't truncated.
+			unread := cached.UnreadCount
+			if cached.UnreadCount <= 1 || localUnread > cached.UnreadCount {
+				unread = localUnread
+			}
+			if isDM {
+				mentions = unread
+			}
+			if cached.MentionCount != mentions || cached.UnreadCount != unread {
+				a.client.Cache().SetChannelUnread(ch.ID, unread, mentions, ch.LastReadTS, ch.LatestTS)
+				a.w.Invalidate()
+			}
+		}(ch)
+	}
+	wg.Wait()
 }
 
 // forceRefresh re-fetches whatever the user is currently looking at: the
 // active thread (if open), the unreads aggregate, or the active channel.
 // It also re-syncs the channel list so unread badges update.
 func (a *App) forceRefresh() {
+	id := a.getActiveID()
+	if id == "__UNREADS__" {
+		priority := make([]string, 0, len(a.cfg.Channels.Pinned)+len(a.cfg.Channels.Hidden))
+		priority = append(priority, a.cfg.Channels.Pinned...)
+		priority = append(priority, a.cfg.Channels.Hidden...)
+		for _, ch := range a.client.Cache().GetAllChannels() {
+			if ch.UnreadCount > 0 {
+				priority = append(priority, ch.ID)
+			}
+		}
+		go a.scanUnreads(priority)
+		return
+	}
+
 	go func() {
 		priority := make([]string, 0, len(a.cfg.Channels.Pinned)+len(a.cfg.Channels.Hidden))
 		priority = append(priority, a.cfg.Channels.Pinned...)
@@ -1947,12 +2086,9 @@ func (a *App) forceRefresh() {
 			go a.fetchThread(chID, threadTS)
 		}
 	}
-	id := a.getActiveID()
 	switch id {
 	case "":
 		return
-	case "__UNREADS__":
-		go a.fetchAllUnreads()
 	case "__THREADS__":
 		go a.fetchAllThreads()
 	default:
@@ -1967,14 +2103,14 @@ func (a *App) pollActiveChannel() {
 	defer t.Stop()
 	for range t.C {
 		id := a.getActiveID()
-		if id == "" {
+		switch id {
+		case "":
 			continue
-		}
-		if id == "__UNREADS__" {
+		case "__UNREADS__":
 			a.fetchAllUnreads()
-		} else if id == "__THREADS__" {
+		case "__THREADS__":
 			a.fetchAllThreads()
-		} else {
+		default:
 			a.fetchMessages(id)
 		}
 	}
@@ -2026,8 +2162,6 @@ func (a *App) fetchMessages(id string) {
 
 	isActive := a.getActiveID() == id && !a.viewingContext
 	if isActive && lastTS != "" && (ch.UnreadCount > 0 || lastTS > ch.LastReadTS) {
-		a.client.Cache().SetChannelUnread(id, 0, 0, lastTS, lastTS)
-		changed = true
 		go func(channelID, timestamp string) {
 			if err := a.client.MarkChannel(channelID, timestamp); err != nil {
 				slog.Debug("MarkChannel failed", "channel", channelID, "error", err)
@@ -2035,7 +2169,6 @@ func (a *App) fetchMessages(id string) {
 		}(id, lastTS)
 	} else if !isActive && ch.MentionCount != mentionsFound {
 		a.client.Cache().SetChannelUnread(id, ch.UnreadCount, mentionsFound, ch.LastReadTS, ch.LatestTS)
-		changed = true
 	}
 
 	if changed {
@@ -2070,66 +2203,28 @@ func (a *App) fetchMessagesAround(id string, ts string) {
 }
 
 func (a *App) fetchAllUnreads() {
-	a.startTask("unreads", "Fetching unreads")
-	defer a.endTask("unreads")
 	var all []slack.Message
-	var mu sync.Mutex
 	channels := a.client.Cache().GetAllChannels()
-
-	var wg sync.WaitGroup
-	sem := make(chan struct{}, 10)
 	selfID := a.client.GetSelfID()
 	groups := a.client.Cache().GetAllUserGroups()
 
 	for _, ch := range channels {
 		if ch.UnreadCount > 0 {
-			wg.Add(1)
-			go func(ch slack.Channel) {
-				defer wg.Done()
-				sem <- struct{}{}
-				defer func() { <-sem }()
-
-				msgs, err := a.client.GetMessages(ch.ID, 100, ch.LastReadTS)
-				if err != nil {
-					slog.Error("fetchAllUnreads failed", "channel", ch.ID, "error", err)
-					return
+			msgs := a.client.Cache().GetMessages(ch.ID)
+			isDM := ch.IsIM || ch.IsMPIM
+			for _, m := range msgs {
+				if m.Timestamp > ch.LastReadTS && (isDM || a.isMentionWithContext(m, selfID, groups)) {
+					m.ChannelID = ch.ID
+					m.ChannelName = ch.Name
+					all = append(all, m)
 				}
-				mentionsFound := 0
-				isDM := ch.IsIM || ch.IsMPIM
-				var channelMsgs []slack.Message
-				for i := range msgs {
-					if isDM || a.isMentionWithContext(msgs[i], selfID, groups) {
-						msgs[i].ChannelID = ch.ID
-						msgs[i].ChannelName = ch.Name
-						channelMsgs = append(channelMsgs, msgs[i])
-						mentionsFound++
-					}
-				}
-				if len(channelMsgs) > 0 {
-					mu.Lock()
-					all = append(all, channelMsgs...)
-					mu.Unlock()
-				}
-
-				// Update the cache with the actual mention count (authoritative for DMs)
-				if isDM {
-					mentionsFound = ch.UnreadCount
-				}
-				if cached := a.client.Cache().GetChannel(ch.ID); cached != nil {
-					if cached.MentionCount != mentionsFound {
-						a.client.Cache().SetChannelUnread(ch.ID, cached.UnreadCount, mentionsFound, cached.LastReadTS, cached.LatestTS)
-					}
-				}
-			}(ch)
+			}
 		}
 	}
-	wg.Wait()
 
-	// Also include unread threads from search. Search "has:thread" gives us recently active threads.
-	// We filter for those with replies newer than our last read of that channel.
-	threadResults, err := a.client.Search("has:thread OR (is:dm has:thread)")
-	if err == nil {
-		for _, r := range threadResults {
+	// Also include unread threads from search.
+	if results, err := a.client.Search("has:thread OR (is:dm has:thread)"); err == nil {
+		for _, r := range results {
 			ch := a.client.Cache().GetChannel(r.ChannelID)
 			if ch == nil {
 				continue
@@ -2137,7 +2232,7 @@ func (a *App) fetchAllUnreads() {
 			isDM := ch.IsIM || ch.IsMPIM
 			isMention := a.isMention(r.Message)
 			if (isDM || isMention) && r.Message.LastReplyTS > ch.LastReadTS {
-				// Avoid duplicates if the parent itself was already added
+				// Avoid duplicates
 				found := false
 				for _, m := range all {
 					if m.Timestamp == r.Message.Timestamp && m.ChannelID == r.ChannelID {

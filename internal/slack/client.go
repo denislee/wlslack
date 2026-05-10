@@ -11,6 +11,7 @@ import (
 	"sort"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"time"
 
 	slackapi "github.com/slack-go/slack"
@@ -202,6 +203,12 @@ type Client struct {
 
 	disableLinkUnfurl  bool
 	disableMediaUnfurl bool
+
+	// aggregateCountsDisabled is set the first time users.counts /
+	// client.counts returns a terminal error (method_unknown, method_deprecated,
+	// missing_scope, etc.) so we stop hammering the endpoint and let the
+	// per-channel fallback take over for the rest of the session.
+	aggregateCountsDisabled atomic.Bool
 }
 
 func NewClient(token, cookie string) (*Client, error) {
@@ -370,8 +377,13 @@ func (c *Client) GetChannels(types []string, priorityIDs []string) ([]Channel, e
 			// Optimistic unread detection: if LatestTS > LastReadTS, we have unreads.
 			// This allows the UI to show activity immediately after the list fetch
 			// without waiting for the slow GetConversationInfo enrichment.
-			if cc.LatestTS != "" && cc.LastReadTS != "" && cc.LatestTS > cc.LastReadTS && cc.UnreadCount == 0 {
+			// We MUST NOT do this if LastReadTS is equal to or greater than LatestTS,
+			// as that would resurge unreads after they were marked read locally.
+			if cc.LatestTS != "" && cc.LatestTS > cc.LastReadTS && cc.UnreadCount == 0 {
 				cc.UnreadCount = 1
+			} else if cc.LatestTS != "" && cc.LatestTS <= cc.LastReadTS {
+				// Ensure unread count is cleared if we've caught up.
+				cc.UnreadCount = 0
 			}
 
 			if activityChanged {
@@ -407,7 +419,7 @@ func (c *Client) GetChannels(types []string, priorityIDs []string) ([]Channel, e
 	slog.Info("GetChannels done", "total", len(allChannels), "with_unread", unreadCount)
 
 	c.cache.SetChannels(allChannels)
-	_ = c.cache.SaveChannelsToDisk(allChannels)
+	_ = c.cache.SaveChannelsToDisk(c.cache.GetAllChannels())
 	return allChannels, nil
 }
 
@@ -509,9 +521,48 @@ func (c *Client) GetUnreadCounts(ids []string) ([]Channel, error) {
 	return channels, nil
 }
 
+// getConversationInfoWithRetry calls conversations.info and waits out a single
+// rate-limit response before retrying. Without this, a brief Tier 3 burst (e.g.
+// after the periodic full scan) would leave a channel's unread state stale
+// until the next polling cycle — favorites in particular would silently miss
+// their badge for a window. Rate-limit errors are no longer logged at the call
+// site since the retry handles them; only terminal failures surface.
+func (c *Client) getConversationInfoWithRetry(channelID, channelName string) (*slackapi.Channel, error) {
+	const maxRetries = 1
+	for attempt := 0; ; attempt++ {
+		info, err := c.api.GetConversationInfo(&slackapi.GetConversationInfoInput{
+			ChannelID:         channelID,
+			IncludeNumMembers: true,
+		})
+		if err == nil {
+			return info, nil
+		}
+		var rl *slackapi.RateLimitedError
+		if errors.As(err, &rl) && attempt < maxRetries {
+			wait := rl.RetryAfter
+			if wait <= 0 || wait > 30*time.Second {
+				wait = 5 * time.Second
+			}
+			time.Sleep(wait)
+			continue
+		}
+		if strings.Contains(err.Error(), "missing_scope") {
+			slog.Warn("conversations.info failed: missing scope (needs channels:read, groups:read, im:read, or mpim:read)", "channel", channelName, "error", err)
+		} else if !errors.As(err, &rl) {
+			slog.Debug("conversations.info error", "channel", channelName, "error", err)
+		}
+		return nil, err
+	}
+}
+
 func (c *Client) enrichWithUnreadCounts(channels []Channel, priorityIDs []string) {
 	var wg sync.WaitGroup
-	sem := make(chan struct{}, 10)
+	// Tier 3 (conversations.info) is ~50 req/min ≈ 0.83 req/s. Keep concurrency
+	// low and stagger meaningfully so a refresh of 10–30 priority channels
+	// doesn't burn the bucket and starve the next cycle. With concurrency 3
+	// and 250ms post-call stagger we stay roughly within burst tolerance and
+	// rate-limited calls retry once via the helper below.
+	sem := make(chan struct{}, 3)
 
 	priorityMap := make(map[string]bool)
 	for _, id := range priorityIDs {
@@ -529,54 +580,103 @@ func (c *Client) enrichWithUnreadCounts(channels []Channel, priorityIDs []string
 			defer wg.Done()
 			sem <- struct{}{}
 			defer func() {
-				// stagger slightly to avoid hitting Tier 3 burst limits
-				time.Sleep(100 * time.Millisecond)
+				time.Sleep(250 * time.Millisecond)
 				<-sem
 			}()
 
-			info, err := c.api.GetConversationInfo(&slackapi.GetConversationInfoInput{
-				ChannelID: channels[idx].ID,
-			})
+			info, err := c.getConversationInfoWithRetry(channels[idx].ID, channels[idx].Name)
 			if err != nil {
-				if strings.Contains(err.Error(), "missing_scope") {
-					slog.Warn("conversations.info failed: missing scope (needs channels:read, groups:read, im:read, or mpim:read)", "channel", channels[idx].Name, "error", err)
-				} else {
-					slog.Debug("conversations.info error", "channel", channels[idx].Name, "error", err)
-				}
 				return
 			}
-			channels[idx].UnreadCount = info.UnreadCountDisplay
-			channels[idx].LastReadTS = info.LastRead
+
+			infoLatest := ""
 			if info.Latest != nil {
-				channels[idx].LatestTS = info.Latest.Timestamp
+				infoLatest = info.Latest.Timestamp
+			}
+			slog.Debug("conversations.info raw",
+				"channel", channels[idx].Name,
+				"id", channels[idx].ID,
+				"unread_display", info.UnreadCountDisplay,
+				"info_last_read", info.LastRead,
+				"info_latest", infoLatest,
+				"cache_last_read", channels[idx].LastReadTS,
+				"cache_latest", channels[idx].LatestTS)
+			if info.UnreadCountDisplay > 0 || (infoLatest != "" && infoLatest > info.LastRead) {
+				slog.Info("conversations.info: unread detected",
+					"channel", channels[idx].Name,
+					"id", channels[idx].ID,
+					"unread_display", info.UnreadCountDisplay,
+					"info_last_read", info.LastRead,
+					"info_latest", infoLatest,
+					"cache_last_read", channels[idx].LastReadTS,
+					"cache_latest", channels[idx].LatestTS)
+			}
+
+			// Stale info protection: Slack's conversations.info is eventually consistent.
+			// If we recently marked the channel as read (e.g. locally or in another
+			// client that updated our state), the info we get back might have an
+			// older LastRead and thus a non-zero UnreadCount.
+			if channels[idx].LastReadTS != "" && (info.LastRead == "" || info.LastRead < channels[idx].LastReadTS) {
+				// We have more recent read state than Slack is reporting.
+				// Keep our LastReadTS and only accept UnreadCount if it's 0 (meaning Slack is ahead or caught up).
+				if info.UnreadCountDisplay == 0 {
+					channels[idx].UnreadCount = 0
+				} else if channels[idx].LastReadTS >= channels[idx].LatestTS {
+					// We've read up to the latest we know about.
+					channels[idx].UnreadCount = 0
+				}
+				// Otherwise, keep current UnreadCount as it's more likely to be accurate than a stale Slack report.
+			} else {
+				channels[idx].UnreadCount = info.UnreadCountDisplay
+				channels[idx].LastReadTS = info.LastRead
+			}
+
+			if info.Latest != nil {
+				if info.Latest.Timestamp > channels[idx].LatestTS {
+					channels[idx].LatestTS = info.Latest.Timestamp
+				}
 			}
 
 			// Fallback: if UnreadCountDisplay is 0 but LatestTS > LastReadTS,
 			// assume at least 1 unread. Bot tokens often get 0 for
 			// UnreadCountDisplay even when unreads exist.
-			if channels[idx].UnreadCount == 0 && channels[idx].LatestTS != "" && channels[idx].LastReadTS != "" {
+			if channels[idx].UnreadCount == 0 && channels[idx].LatestTS != "" {
 				if channels[idx].LatestTS > channels[idx].LastReadTS {
 					channels[idx].UnreadCount = 1
 				}
 			}
 
-			// If LatestTS is still empty after info check, do a surgical history probe
-			// to be absolutely sure it's empty before we let the UI hide it.
-			if channels[idx].LatestTS == "" {
+			// History probe: conversations.info doesn't return the channel's
+			// `latest` timestamp on most tokens, so UnreadCountDisplay==0 ends
+			// up looking like "caught up" when there's actually new activity
+			// past LastRead. We always do a limit=1 history probe (when not
+			// rate-limit-blocked) to get the real latest TS and reconcile.
+			//
+			// To avoid doubling our Tier 3 footprint we skip the probe when
+			// UnreadCountDisplay already reports unreads (the token has the
+			// right scope and we trust the count).
+			if channels[idx].UnreadCount == 0 {
 				h, err := c.api.GetConversationHistory(&slackapi.GetConversationHistoryParameters{
 					ChannelID: channels[idx].ID,
 					Limit:     1,
 				})
 				if err == nil && len(h.Messages) > 0 {
-					channels[idx].LatestTS = h.Messages[0].Timestamp
-					slog.Debug("sidebar: verified non-empty via history", "id", channels[idx].ID, "name", channels[idx].Name, "ts", channels[idx].LatestTS)
-				} else if err == nil {
-					slog.Debug("sidebar: verified TRULY empty via history", "id", channels[idx].ID, "name", channels[idx].Name)
-				} else {
-					slog.Debug("sidebar: history probe failed", "id", channels[idx].ID, "error", err)
+					histTS := h.Messages[0].Timestamp
+					if histTS > channels[idx].LatestTS {
+						channels[idx].LatestTS = histTS
+					}
+					if channels[idx].LastReadTS != "" && histTS > channels[idx].LastReadTS {
+						channels[idx].UnreadCount = 1
+						slog.Info("history probe: unread detected",
+							"channel", channels[idx].Name,
+							"id", channels[idx].ID,
+							"hist_latest", histTS,
+							"last_read", channels[idx].LastReadTS)
+					}
+				} else if err != nil {
+					slog.Debug("history probe failed", "channel", channels[idx].Name, "error", err)
 				}
 			}
-
 			channels[idx].LatestTSVerified = true
 		}(i)
 	}
@@ -897,6 +997,10 @@ func (c *Client) RemoveReaction(channelID, timestamp, emoji string) error {
 }
 
 func (c *Client) MarkChannel(channelID, ts string) error {
+	// Optimistically clear the unread count in cache. This eliminates the
+	// necessity of managing the cache manually in the UI.
+	c.cache.SetChannelUnread(channelID, 0, 0, ts, ts)
+
 	if err := c.api.MarkConversation(channelID, ts); err != nil {
 		return fmt.Errorf("mark channel: %w", friendlyError(err))
 	}

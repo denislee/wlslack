@@ -26,6 +26,7 @@ type SettingsScreen struct {
 	toggleMain    widget.Clickable
 	toggleRecent  widget.Clickable
 	toggleHideEmpty widget.Clickable
+	toggleUnreadOnCollapse widget.Clickable
 	toggleStatusBar widget.Clickable
 	toggleLinkUnfurl  widget.Clickable
 	toggleMediaUnfurl widget.Clickable
@@ -132,6 +133,10 @@ func (s *SettingsScreen) Layout(gtx layout.Context) layout.Dimensions {
 	}
 	if s.toggleHideEmpty.Clicked(gtx) {
 		th.HideEmptyChannels = !th.HideEmptyChannels
+		dirty = true
+	}
+	if s.toggleUnreadOnCollapse.Clicked(gtx) {
+		th.ShowUnreadOnCollapse = !th.ShowUnreadOnCollapse
 		dirty = true
 	}
 	if s.toggleStatusBar.Clicked(gtx) {
@@ -280,6 +285,25 @@ func (s *SettingsScreen) layoutThemeToggles(gtx layout.Context, th *Theme) layou
 						label = "on"
 					}
 					return s.button(gtx, th, &s.toggleHideEmpty, label)
+				}),
+			)
+		}),
+		layout.Rigid(layout.Spacer{Height: unit.Dp(6)}.Layout),
+		layout.Rigid(func(gtx layout.Context) layout.Dimensions {
+			return layout.Flex{Alignment: layout.Middle}.Layout(gtx,
+				layout.Rigid(func(gtx layout.Context) layout.Dimensions {
+					lbl := material.Body2(th.Mat, "Show unread on collapse")
+					th.applyFont(&lbl, FontStyle{})
+					lbl.Color = th.Pal.TextDim
+					gtx.Constraints.Min.X = gtx.Dp(unit.Dp(160))
+					return lbl.Layout(gtx)
+				}),
+				layout.Rigid(func(gtx layout.Context) layout.Dimensions {
+					label := "off"
+					if th.ShowUnreadOnCollapse {
+						label = "on"
+					}
+					return s.button(gtx, th, &s.toggleUnreadOnCollapse, label)
 				}),
 			)
 		}),

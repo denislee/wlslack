@@ -18,6 +18,10 @@ type Cache struct {
 	usergroups map[string]*UserGroup
 
 	store *sqliteStore
+
+	// OnUpdate is called whenever the cache is significantly modified
+	// (e.g. unread counts change).
+	OnUpdate func()
 }
 
 // NewCache returns an in-memory cache backed by a local SQLite database for
@@ -204,13 +208,19 @@ func (c *Cache) SetChannels(channels []Channel) {
 		id := channels[i].ID
 		newCh := channels[i]
 		if existing, ok := c.channels[id]; ok {
+			// Monotonicity for LatestTS: never move backwards.
 			if existing.LatestTS > newCh.LatestTS {
 				newCh.LatestTS = existing.LatestTS
 			}
-			if newCh.LastReadTS == "" && existing.LastReadTS != "" {
-				newCh.UnreadCount = existing.UnreadCount
+
+			// Monotonicity for LastReadTS: never move backwards. Slack's
+			// eventually consistent responses often include stale read pointers.
+			if existing.LastReadTS != "" && (newCh.LastReadTS == "" || newCh.LastReadTS < existing.LastReadTS) {
 				newCh.LastReadTS = existing.LastReadTS
+				newCh.UnreadCount = existing.UnreadCount
+				newCh.MentionCount = existing.MentionCount
 			}
+
 			// MentionCount is set by the mention scan, not the channel
 			// list payload. Preserve it across SetChannels writes
 			// (GetChannels, ResolveConversationNames) so the sidebar
@@ -243,6 +253,16 @@ func (c *Cache) SetChannelUnread(id string, unreadCount, mentionCount int, lastR
 		c.mu.Unlock()
 		return
 	}
+
+	// Stale update protection: if the incoming lastReadTS is older than what we
+	// already have, ignore the update. Slack's eventually consistent API often
+	// returns stale unread counts/read pointers for several seconds after a
+	// mark-as-read call.
+	if lastReadTS != "" && existing.LastReadTS != "" && lastReadTS < existing.LastReadTS {
+		c.mu.Unlock()
+		return
+	}
+
 	updated := *existing
 	updated.UnreadCount = unreadCount
 	if unreadCount == 0 {
@@ -254,7 +274,12 @@ func (c *Cache) SetChannelUnread(id string, unreadCount, mentionCount int, lastR
 		updated.LatestTS = latestTS
 	}
 	c.channels[id] = &updated
+	onUpdate := c.OnUpdate
 	c.mu.Unlock()
+
+	if onUpdate != nil {
+		onUpdate()
+	}
 
 	if c.store != nil {
 		if err := c.store.updateChannelUnread(id, unreadCount, mentionCount, lastReadTS, latestTS); err != nil {

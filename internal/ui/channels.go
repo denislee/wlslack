@@ -54,8 +54,9 @@ type ChannelsSidebar struct {
 	// favorites change without waiting for the next poll.
 	raw []slack.Channel
 
-	showOnlyRecent bool
-	hideEmpty      bool
+	showOnlyRecent       bool
+	hideEmpty            bool
+	showUnreadOnCollapse bool
 }
 
 type rowKind int
@@ -199,6 +200,14 @@ func (s *ChannelsSidebar) favoritesSliceLocked() []string {
 	}
 	sort.Strings(out)
 	return out
+}
+
+// Favorites returns a snapshot of the current favorite channel IDs. Safe to
+// call from any goroutine; callers may mutate the returned slice freely.
+func (s *ChannelsSidebar) Favorites() []string {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	return s.favoritesSliceLocked()
 }
 
 // FirstID returns the ID of the first selectable (non-header) row, or "" if
@@ -480,28 +489,36 @@ func (s *ChannelsSidebar) rebuildRowsLocked() {
 
 		items := g.items
 		if collapsed {
-			// Even when the group is collapsed, surface channels with unread
-			// activity so the user doesn't lose track of them.
-			filtered := make([]slack.Channel, 0, len(items))
-			for _, ch := range items {
-				if ch.UnreadCount > 0 || ch.MentionCount > 0 {
-					filtered = append(filtered, ch)
-				}
-			}
-			if len(filtered) == 0 {
+			if !s.showUnreadOnCollapse {
 				continue
 			}
-			items = filtered
+			// Even when the group is collapsed, surface channels with unread
+			// activity so the user doesn't lose track of them.
+			// Skip Favorites — keep them all if showUnreadOnCollapse is on.
+			if !g.fav {
+				filtered := make([]slack.Channel, 0, len(items))
+				for _, ch := range items {
+					if ch.UnreadCount > 0 || ch.MentionCount > 0 {
+						filtered = append(filtered, ch)
+					}
+				}
+				if len(filtered) == 0 {
+					continue
+				}
+				items = filtered
+			}
 		} else {
 			if s.showOnlyRecent && g.limit && len(items) > 10 {
 				items = items[:10]
 			}
 
-			// Focus mode: when this group has any channel with unread activity,
-			// collapse the visible list down to just those channels (plus the
-			// active one so the user's current position never disappears).
-			// Skip Home — its rows are pseudo-aggregates that should always show.
-			if g.header != "Home" && groupHasActivity(items) {
+			// Focus mode: when ShowUnreadOnCollapse is on, hide everything
+			// except channels with unread activity (plus the active one) across
+			// every non-Home group. Otherwise fall back to the per-group rule:
+			// only filter when the group itself contains an unread.
+			// Skip Home and Favorites — their rows are pseudo-aggregates or
+			// curated favorites that should always show.
+			if g.header != "Home" && !g.fav && (s.showUnreadOnCollapse || groupHasActivity(items)) {
 				filtered := make([]slack.Channel, 0, len(items))
 				for _, ch := range items {
 					if ch.UnreadCount > 0 || ch.MentionCount > 0 || ch.ID == s.activeID {
@@ -575,6 +592,10 @@ func (s *ChannelsSidebar) Layout(gtx layout.Context, th *Theme, fm *slack.Format
 	}
 	if s.hideEmpty != th.HideEmptyChannels {
 		s.hideEmpty = th.HideEmptyChannels
+		s.dirty = true
+	}
+	if s.showUnreadOnCollapse != th.ShowUnreadOnCollapse {
+		s.showUnreadOnCollapse = th.ShowUnreadOnCollapse
 		s.dirty = true
 	}
 

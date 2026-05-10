@@ -11,6 +11,7 @@ type UIState struct {
 	UnreadOnly             bool              `json:"unread_only"`
 	ShowOnlyRecentChannels bool              `json:"show_only_recent_channels"`
 	HideEmptyChannels      bool              `json:"hide_empty_channels"`
+	ShowUnreadOnCollapse   bool              `json:"show_unread_on_collapse"`
 	ShowStatusBar          bool              `json:"show_status_bar"`
 	DisableLinkUnfurl      bool              `json:"disable_link_unfurl"`
 	DisableMediaUnfurl     bool              `json:"disable_media_unfurl"`
@@ -48,6 +49,7 @@ func DefaultUIState() UIState {
 		UnreadOnly:             true,
 		ShowOnlyRecentChannels: false,
 		HideEmptyChannels:      false,
+		ShowUnreadOnCollapse:   true,
 		ShowStatusBar:          true,
 		Favorites:              []string{},
 		CollapsedGroups: []string{},
