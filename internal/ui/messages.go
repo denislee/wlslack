@@ -593,6 +593,22 @@ func (m *MessagesView) SetHeader(name, topic string) {
 	m.topic = topic
 }
 
+// reactionsEqual reports whether two reaction slices represent the same
+// state. Equality requires matching name, count, and HasMe per entry — count
+// or HasMe shifts when the user echoes onto an existing reaction without
+// changing the slice length.
+func reactionsEqual(a, b []slack.Reaction) bool {
+	if len(a) != len(b) {
+		return false
+	}
+	for i := range a {
+		if a[i].Name != b[i].Name || a[i].Count != b[i].Count || a[i].HasMe != b[i].HasMe {
+			return false
+		}
+	}
+	return true
+}
+
 // SetMessages replaces the displayed messages, preserving rich-text state by
 // timestamp. Returns true if any message changed or new ones were added.
 func (m *MessagesView) SetMessages(msgs []slack.Message) bool {
@@ -604,9 +620,9 @@ func (m *MessagesView) SetMessages(msgs []slack.Message) bool {
 		for i := range m.rows {
 			if m.rows[i].msg.Timestamp != msgs[i].Timestamp ||
 				m.rows[i].msg.Text != msgs[i].Text ||
-				len(m.rows[i].msg.Reactions) != len(msgs[i].Reactions) ||
 				m.rows[i].msg.Edited != msgs[i].Edited ||
-				m.rows[i].msg.ReplyCount != msgs[i].ReplyCount {
+				m.rows[i].msg.ReplyCount != msgs[i].ReplyCount ||
+				!reactionsEqual(m.rows[i].msg.Reactions, msgs[i].Reactions) {
 				changed = true
 				break
 			}

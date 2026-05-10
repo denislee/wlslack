@@ -1123,10 +1123,10 @@ func (a *App) openReactionPicker() {
 		return
 	}
 	chID := a.getActiveID()
-	if chID == "__UNREADS__" && msg.ChannelID != "" {
+	if (chID == "__UNREADS__" || chID == "__THREADS__") && msg.ChannelID != "" {
 		chID = msg.ChannelID
 	}
-	if chID == "" {
+	if chID == "" || strings.HasPrefix(chID, "__") {
 		return
 	}
 
@@ -1171,10 +1171,10 @@ func (a *App) echoReactions() {
 		return
 	}
 	chID := a.getActiveID()
-	if chID == "__UNREADS__" && msg.ChannelID != "" {
+	if (chID == "__UNREADS__" || chID == "__THREADS__") && msg.ChannelID != "" {
 		chID = msg.ChannelID
 	}
-	if chID == "" {
+	if chID == "" || strings.HasPrefix(chID, "__") {
 		return
 	}
 
@@ -1211,6 +1211,7 @@ func (a *App) echoReactions() {
 				}
 			}
 		}
+		// Single refresh after all operations are done.
 		a.refreshAfterReaction(chID, ts)
 	}()
 }
@@ -1222,12 +1223,25 @@ func (a *App) refreshAfterReaction(chID, ts string) {
 	if a.messages.InThread() {
 		curCh, threadTS := a.messages.ThreadInfo()
 		if curCh == chID && threadTS != "" {
-			a.fetchThread(chID, threadTS)
-			a.w.Invalidate()
+			go a.fetchThread(chID, threadTS)
 			return
 		}
 	}
-	a.refreshView(chID)
+
+	id := a.getActiveID()
+	switch id {
+	case "__UNREADS__":
+		go a.fetchAllUnreads()
+	case "__THREADS__":
+		go a.fetchAllThreads()
+	case chID:
+		go a.fetchMessages(chID)
+	default:
+		// If we're looking at a different channel than where the reaction
+		// landed, there's no need to refresh the messages pane, but we might
+		// want to refresh the sidebar if unread counts changed.
+		// For now, doing nothing is safe.
+	}
 	a.w.Invalidate()
 	_ = ts
 }
