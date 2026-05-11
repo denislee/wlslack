@@ -589,6 +589,13 @@ func (c *Client) enrichWithUnreadCounts(channels []Channel, priorityIDs []string
 				return
 			}
 
+			// Capture the pre-call state so fallbacks below can preserve a
+			// more precise count (e.g. from scanMentions or client.counts +
+			// local scan) when conversations.info returns the imprecise
+			// UnreadCountDisplay==0 that's typical of xoxc/xoxb tokens.
+			prevUnread := channels[idx].UnreadCount
+			prevLastRead := channels[idx].LastReadTS
+
 			infoLatest := ""
 			if info.Latest != nil {
 				infoLatest = info.Latest.Timestamp
@@ -639,10 +646,18 @@ func (c *Client) enrichWithUnreadCounts(channels []Channel, priorityIDs []string
 
 			// Fallback: if UnreadCountDisplay is 0 but LatestTS > LastReadTS,
 			// assume at least 1 unread. Bot tokens often get 0 for
-			// UnreadCountDisplay even when unreads exist.
+			// UnreadCountDisplay even when unreads exist. When LastReadTS
+			// hasn't advanced, the previously cached count (set by
+			// scanMentions or a prior info call) is still valid — preserve
+			// it instead of clobbering a real number like 5 down to 1 every
+			// refresh tick.
 			if channels[idx].UnreadCount == 0 && channels[idx].LatestTS != "" {
 				if channels[idx].LatestTS > channels[idx].LastReadTS {
-					channels[idx].UnreadCount = 1
+					if channels[idx].LastReadTS == prevLastRead && prevUnread > 1 {
+						channels[idx].UnreadCount = prevUnread
+					} else {
+						channels[idx].UnreadCount = 1
+					}
 				}
 			}
 
@@ -666,7 +681,11 @@ func (c *Client) enrichWithUnreadCounts(channels []Channel, priorityIDs []string
 						channels[idx].LatestTS = histTS
 					}
 					if channels[idx].LastReadTS != "" && histTS > channels[idx].LastReadTS {
-						channels[idx].UnreadCount = 1
+						if channels[idx].LastReadTS == prevLastRead && prevUnread > 1 {
+							channels[idx].UnreadCount = prevUnread
+						} else {
+							channels[idx].UnreadCount = 1
+						}
 						slog.Info("history probe: unread detected",
 							"channel", channels[idx].Name,
 							"id", channels[idx].ID,
