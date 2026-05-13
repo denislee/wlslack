@@ -447,6 +447,10 @@ func (s *ChannelsSidebar) rebuildRowsLocked() {
 	}
 
 	byActivity(favs)
+	byActivity(channels)
+	byActivity(externals)
+	byActivity(dms)
+	byActivity(mpdms)
 	// Home contains special aggregate views: Threads and Mentions.
 	var home []slack.Channel
 	totalMentions := 0

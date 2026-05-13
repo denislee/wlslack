@@ -183,7 +183,7 @@ func Run(client *slack.Client, cfg *config.Config) error {
 	a.uploadProgress.Store(-1)
 	a.switcher = newQuickSwitcher(a.onSwitcherSelect, a.onSwitcherSearch)
 	a.newChatPicker = newNewChatPicker(a.onNewChatSubmit)
-	a.linkPicker = newLinkPicker(a.onLinkPickerSelect)
+	a.linkPicker = newLinkPicker()
 	a.imageViewer = newImageViewer(images)
 	a.messageEditor = newMessageEditor()
 	a.reactionPicker = newReactionPicker(images, a.onReactionPickerSelect)
@@ -1149,24 +1149,60 @@ func (a *App) onSwitcherSearch(query string) {
 }
 
 // openSelectedLinks runs Enter on the highlighted message. Resolution order:
-//   - 1 link > open in browser
-//   - >1 links > link picker
-//   - 0 links and >1 images > in-app image viewer
-//   - everything else > no-op (single inline image already shows in the row)
+//   - 1 link and 0 images > open in browser
+//   - 0 links and >=1 images > in-app image viewer
+//   - mix of links and images, or >1 links > picker
+//   - nothing openable > no-op (single inline image already shows in the row)
 func (a *App) openSelectedLinks() {
 	urls := a.messages.SelectedMessageURLs()
-	switch len(urls) {
-	case 0:
-		images := a.messages.SelectedMessageImages()
-		if len(images) >= 1 {
-			a.imageViewer.SetFiles(images)
-			a.imageViewerOpen = true
-			a.w.Invalidate()
-		}
-	case 1:
+	images := a.messages.SelectedMessageImages()
+	switch {
+	case len(urls) == 0 && len(images) == 0:
+		return
+	case len(urls) == 0:
+		a.imageViewer.SetFiles(images)
+		a.imageViewerOpen = true
+		a.w.Invalidate()
+	case len(urls) == 1 && len(images) == 0:
 		openURL(urls[0])
 	default:
-		a.linkPicker.SetURLs(urls)
+		rows := make([]pickerRow, 0, len(images)+len(urls))
+		if len(images) > 0 {
+			files := images
+			label := "Image"
+			if len(files) > 1 {
+				label = fmt.Sprintf("Images (%d)", len(files))
+			} else if files[0].Name != "" {
+				label = "Image: " + files[0].Name
+			}
+			rows = append(rows, pickerRow{
+				label: label,
+				onPick: func() {
+					a.closeLinkPicker()
+					a.imageViewer.SetFiles(files)
+					a.imageViewerOpen = true
+					a.w.Invalidate()
+				},
+			})
+		}
+		for _, u := range urls {
+			label := u
+			if len(images) > 0 {
+				label = "Link: " + u
+			}
+			rows = append(rows, pickerRow{
+				label: label,
+				onPick: func() {
+					a.closeLinkPicker()
+					openURL(u)
+				},
+			})
+		}
+		title := "Open link"
+		if len(images) > 0 {
+			title = "Open"
+		}
+		a.linkPicker.SetItems(title, rows)
 		a.linkPickerOpen = true
 		a.w.Invalidate()
 	}
@@ -1231,11 +1267,6 @@ func (a *App) closeLinkPicker() {
 	a.linkPickerOpen = false
 	a.pendFocusKeyTag = true
 	a.w.Invalidate()
-}
-
-func (a *App) onLinkPickerSelect(url string) {
-	openURL(url)
-	a.closeLinkPicker()
 }
 
 // openReactionPicker drops the picker over the message pane, anchored to the
@@ -2587,9 +2618,25 @@ func slackTSUnix(ts string) int64 {
 }
 
 func (a *App) handleClipboardEvents(gtx layout.Context) {
-	// Catch all types to log what's actually coming in
+	// Gio's pointerFilter matches DataEvents by exact MIME via
+	// slices.Contains(targetMimes, e.Type), so each accepted type needs its
+	// own TargetFilter — a filter with empty Type matches nothing and the
+	// event is silently dropped. Wayland always relabels text as
+	// "application/text" (see app/os_wayland.go), so that one is required.
+	filters := []event.Filter{
+		transfer.TargetFilter{Target: &a.composerPasteTag, Type: "application/text"},
+		transfer.TargetFilter{Target: &a.composerPasteTag, Type: "text/plain"},
+		transfer.TargetFilter{Target: &a.composerPasteTag, Type: "text/plain;charset=utf-8"},
+		transfer.TargetFilter{Target: &a.composerPasteTag, Type: "UTF8_STRING"},
+		transfer.TargetFilter{Target: &a.composerPasteTag, Type: "text/uri-list"},
+		transfer.TargetFilter{Target: &a.composerPasteTag, Type: "image/png"},
+		transfer.TargetFilter{Target: &a.composerPasteTag, Type: "image/jpeg"},
+		transfer.TargetFilter{Target: &a.composerPasteTag, Type: "image/gif"},
+		transfer.TargetFilter{Target: &a.composerPasteTag, Type: "image/bmp"},
+		transfer.TargetFilter{Target: &a.composerPasteTag, Type: "image/tiff"},
+	}
 	for {
-		ev, ok := gtx.Source.Event(transfer.TargetFilter{Target: &a.composerPasteTag})
+		ev, ok := gtx.Source.Event(filters...)
 		if !ok {
 			break
 		}
@@ -2638,8 +2685,12 @@ func (a *App) handleClipboardEvents(gtx layout.Context) {
 				}
 				a.w.Invalidate()
 				return
-			} else if dev.Type == "text/plain" || dev.Type == "text/plain;charset=utf-8" || dev.Type == "UTF8_STRING" {
+			} else if dev.Type == "application/text" || dev.Type == "text/plain" || dev.Type == "text/plain;charset=utf-8" || dev.Type == "UTF8_STRING" {
+				// Gio's Wayland/X11 backends always relabel clipboard text as
+				// "application/text" regardless of the wire mime, so that case
+				// must be matched or text pastes are dropped silently.
 				a.composer.editor.Insert(string(data))
+				a.w.Invalidate()
 			}
 		}
 	}

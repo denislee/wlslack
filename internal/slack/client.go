@@ -1485,6 +1485,17 @@ func (c *Client) convertMessage(msg slackapi.Message) Message {
 		editedTS = msg.Edited.Timestamp
 	}
 
+	// "tombstone" is the subtype Slack uses for a thread parent whose body
+	// was deleted but whose replies survive — it returns an otherwise blank
+	// message so the thread stays reachable. Without a placeholder the row
+	// renders as just a header, looking like a bug. Mark it deleted and give
+	// it a body so the row is identifiable and the thread badge still works.
+	deleted := false
+	if msg.SubType == "tombstone" && text == "" && len(files) == 0 {
+		text = "[deleted message]"
+		deleted = true
+	}
+
 	if text == "" && len(files) == 0 {
 		slog.Debug("unrendered message",
 			"type", msg.Type,
@@ -1531,12 +1542,25 @@ func (c *Client) convertMessage(msg slackapi.Message) Message {
 		}
 	}
 
+	// Thread-broadcast rows are replies that Slack mirrors back into the
+	// channel index. The Slack API has shipped at least two shapes for them
+	// over the years: some payloads expose `thread_ts` directly on the
+	// envelope, others tuck the parent ts into a `root` sub-object and leave
+	// `thread_ts` blank. Without the parent ts the UI can't open the thread
+	// the broadcast belongs to, so opening a broadcast from the channel
+	// renders just the lone reply. Fall back to `root.ts` to recover.
+	threadTS := msg.ThreadTimestamp
+	isBroadcast := msg.SubType == slackapi.MsgSubTypeThreadBroadcast
+	if isBroadcast && threadTS == "" && msg.Root != nil {
+		threadTS = msg.Root.Timestamp
+	}
+
 	return Message{
 		Timestamp:   msg.Timestamp,
 		UserID:      userID,
 		Username:    username,
 		Text:        text,
-		ThreadTS:    msg.ThreadTimestamp,
+		ThreadTS:    threadTS,
 		ReplyCount:  msg.ReplyCount,
 		ReplyUsers:  msg.ReplyUsers,
 		LastReplyTS: msg.LatestReply,
@@ -1544,8 +1568,10 @@ func (c *Client) convertMessage(msg slackapi.Message) Message {
 		Edited:      msg.Edited != nil,
 		EditedTS:    editedTS,
 		EditHistory: nil,
-		Files:       files,
-		IsBot:       msg.BotID != "" || msg.BotProfile != nil,
+		Deleted:           deleted,
+		Files:             files,
+		IsBot:             msg.BotID != "" || msg.BotProfile != nil,
+		IsThreadBroadcast: isBroadcast,
 	}
 }
 
@@ -1717,6 +1743,9 @@ func (c *Client) extractAttachmentText(attachments []slackapi.Attachment) string
 		if a.Pretext != "" {
 			lines = append(lines, a.Pretext)
 		}
+		if a.AuthorName != "" {
+			lines = append(lines, a.AuthorName)
+		}
 		if a.Title != "" {
 			lines = append(lines, a.Title)
 		}
@@ -1730,6 +1759,9 @@ func (c *Client) extractAttachmentText(attachments []slackapi.Attachment) string
 
 		if text != "" {
 			lines = append(lines, text)
+		}
+		if a.Footer != "" {
+			lines = append(lines, a.Footer)
 		}
 
 		if len(lines) == 0 && a.Fallback != "" {

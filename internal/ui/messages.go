@@ -5,6 +5,8 @@ import (
 	"image"
 	"image/color"
 	"image/gif"
+	"regexp"
+	"strings"
 	"sync"
 	"time"
 
@@ -1118,6 +1120,19 @@ func (m *MessagesView) layoutRowLocked(gtx layout.Context, th *Theme, fmt *slack
 									}),
 								)
 							}),
+							// "Replied to a thread" hint for thread-broadcast messages.
+							// Only meaningful in the channel view; inside a thread every
+							// row is already in a thread context.
+							layout.Rigid(func(gtx layout.Context) layout.Dimensions {
+								if m.threadActive || !r.msg.IsThreadBroadcast {
+									return layout.Dimensions{}
+								}
+								lbl := material.Caption(th.Mat, "└─ replied to a thread")
+								lbl.Color = th.Pal.Link
+								lbl.Font.Style = font.Italic
+								th.applyFont(&lbl, th.Fonts.Messages)
+								return layout.Inset{Bottom: unit.Dp(2)}.Layout(gtx, lbl.Layout)
+							}),
 							// Body: styled richtext
 							layout.Rigid(func(gtx layout.Context) layout.Dimensions {
 								return m.layoutBody(gtx, th, fmt, r)
@@ -1183,14 +1198,48 @@ func (m *MessagesView) layoutRowLocked(gtx layout.Context, th *Theme, fmt *slack
 	)
 }
 
+// reSoloEmoji matches a message body that is a single emoji shortcode,
+// optionally followed by a skin-tone modifier (Slack ships those as
+// `:wave::skin-tone-2:`).
+var reSoloEmoji = regexp.MustCompile(`^:([a-z0-9_+-]+):(?::skin-tone-[0-9]+:)?$`)
+
 func (m *MessagesView) layoutBody(gtx layout.Context, th *Theme, fm *slack.Formatter, r *messageRow) layout.Dimensions {
+	// Slack renders a message whose entire body is a single emoji at a
+	// noticeably larger size ("jumbomoji"). For workspace-custom emoji the
+	// resolved value is an image URL; if we let it flow through the regular
+	// span path it would render as a hyperlink to a PNG, which to the reader
+	// looks like the message "didn't show". Detect the solo-emoji case here
+	// and render the glyph or image inline instead.
+	if trimmed := strings.TrimSpace(r.msg.Text); trimmed != "" {
+		if mm := reSoloEmoji.FindStringSubmatch(trimmed); mm != nil {
+			name := mm[1]
+			if fm.IsCustomEmoji(name) {
+				return m.layoutSoloCustomEmoji(gtx, th, fm.FormatEmoji(name))
+			}
+			glyph := fm.FormatEmoji(name)
+			if glyph != "" && glyph != ":"+name+":" {
+				return m.layoutSoloUnicodeEmoji(gtx, th, glyph)
+			}
+		}
+	}
 	if !r.spansOk {
 		r.spans = fm.FormatSpans(r.msg.Text)
 		r.spansOk = true
 	}
 	spans := r.spans
 	if len(spans) == 0 {
-		return layout.Dimensions{}
+		// A row with no body, no files, and no reactions would render as just
+		// a header — confusing when the message has a thread underneath it
+		// (the user sees a "blank" row that, on open, contains replies). Show
+		// a muted placeholder so the row is identifiable.
+		if len(r.msg.Files) > 0 {
+			return layout.Dimensions{}
+		}
+		lbl := material.Body1(th.Mat, "(no preview)")
+		lbl.Color = th.Pal.TextMuted
+		lbl.Font.Style = font.Italic
+		th.applyFont(&lbl, th.Fonts.Messages)
+		return lbl.Layout(gtx)
 	}
 
 	type chunk struct {
@@ -1242,6 +1291,47 @@ func (m *MessagesView) layoutBody(gtx layout.Context, th *Theme, fm *slack.Forma
 	}
 
 	return layout.Flex{Axis: layout.Vertical}.Layout(gtx, children...)
+}
+
+// layoutSoloCustomEmoji renders a single custom (workspace-uploaded) emoji
+// as an inline image — the same treatment Slack gives jumbo emoji in its own
+// client. Falls back to the URL as text if the fetch failed, so the row
+// never goes blank.
+func (m *MessagesView) layoutSoloCustomEmoji(gtx layout.Context, th *Theme, url string) layout.Dimensions {
+	const sizeDp = 32
+	if m.images != nil {
+		if g, done := m.images.GetGif(url); done && g != nil && len(g.Image) > 1 {
+			return m.layoutGif(gtx, th, g, sizeDp, sizeDp)
+		}
+		imgOp, ok, done := m.images.GetOp(url)
+		if !done {
+			// Reserve the eventual square so the row doesn't reflow when
+			// the image lands.
+			sz := gtx.Dp(sizeDp)
+			return layout.Dimensions{Size: image.Point{X: sz, Y: sz}}
+		}
+		if ok {
+			sz := gtx.Dp(sizeDp)
+			gtx.Constraints = layout.Exact(image.Point{X: sz, Y: sz})
+			w := widget.Image{
+				Src:      imgOp,
+				Fit:      widget.Contain,
+				Position: layout.W,
+			}
+			return w.Layout(gtx)
+		}
+	}
+	lbl := material.Body2(th.Mat, url)
+	lbl.Color = th.Pal.TextMuted
+	th.applyFont(&lbl, th.Fonts.Messages)
+	return lbl.Layout(gtx)
+}
+
+// layoutSoloUnicodeEmoji renders a single unicode emoji at jumbomoji size.
+func (m *MessagesView) layoutSoloUnicodeEmoji(gtx layout.Context, th *Theme, glyph string) layout.Dimensions {
+	lbl := material.H5(th.Mat, glyph)
+	lbl.Color = th.Pal.Text
+	return lbl.Layout(gtx)
 }
 
 // layoutFiles renders inline previews for image attachments. Non-image files

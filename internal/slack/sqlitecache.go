@@ -72,6 +72,8 @@ func initSchema(db *sql.DB) error {
 			deleted INTEGER NOT NULL DEFAULT 0,
 			files TEXT,
 			is_bot INTEGER NOT NULL DEFAULT 0,
+			is_thread_broadcast INTEGER NOT NULL DEFAULT 0,
+			msg_thread_ts TEXT NOT NULL DEFAULT '',
 			PRIMARY KEY (channel_id, thread_ts, ts)
 		)`,
 		`CREATE INDEX IF NOT EXISTS idx_messages_channel_ts ON messages(channel_id, thread_ts, ts_unix)`,
@@ -116,6 +118,8 @@ func initSchema(db *sql.DB) error {
 		`ALTER TABLE users ADD COLUMN status_text TEXT`,
 		`ALTER TABLE channels ADD COLUMN mention_count INTEGER NOT NULL DEFAULT 0`,
 		`ALTER TABLE messages ADD COLUMN deleted INTEGER NOT NULL DEFAULT 0`,
+		`ALTER TABLE messages ADD COLUMN is_thread_broadcast INTEGER NOT NULL DEFAULT 0`,
+		`ALTER TABLE messages ADD COLUMN msg_thread_ts TEXT NOT NULL DEFAULT ''`,
 	}
 	for _, m := range migrations {
 		if _, err := db.Exec(m); err != nil && !strings.Contains(err.Error(), "duplicate column") {
@@ -346,7 +350,8 @@ func (s *sqliteStore) updateChannelUnread(id string, unread, mention int, lastRe
 func (s *sqliteStore) loadMessages(channelID, threadTS string, since int64) ([]Message, error) {
 	rows, err := s.db.Query(`
 		SELECT ts, user_id, username, body, reply_count, reply_users, last_reply_ts,
-		       reactions, edited, edited_ts, edit_history, deleted, files, is_bot
+		       reactions, edited, edited_ts, edit_history, deleted, files, is_bot,
+		       is_thread_broadcast, msg_thread_ts
 		FROM messages
 		WHERE channel_id = ? AND thread_ts = ? AND ts_unix >= ?
 		ORDER BY ts ASC`,
@@ -359,10 +364,11 @@ func (s *sqliteStore) loadMessages(channelID, threadTS string, since int64) ([]M
 	var out []Message
 	for rows.Next() {
 		var m Message
-		var userID, username, body, replyUsers, lastReply, reactions, editedTS, history, files sql.NullString
-		var edited, deleted, isBot int
+		var userID, username, body, replyUsers, lastReply, reactions, editedTS, history, files, msgThreadTS sql.NullString
+		var edited, deleted, isBot, isThreadBroadcast int
 		if err := rows.Scan(&m.Timestamp, &userID, &username, &body, &m.ReplyCount,
-			&replyUsers, &lastReply, &reactions, &edited, &editedTS, &history, &deleted, &files, &isBot); err != nil {
+			&replyUsers, &lastReply, &reactions, &edited, &editedTS, &history, &deleted, &files, &isBot,
+			&isThreadBroadcast, &msgThreadTS); err != nil {
 			return nil, err
 		}
 		m.UserID = userID.String
@@ -373,7 +379,14 @@ func (s *sqliteStore) loadMessages(channelID, threadTS string, since int64) ([]M
 		m.EditedTS = editedTS.String
 		m.Deleted = deleted != 0
 		m.IsBot = isBot != 0
-		if threadTS != "" {
+		m.IsThreadBroadcast = isThreadBroadcast != 0
+		// Prefer the message's own thread_ts (so thread_broadcast rows that
+		// live in the channel index remember which thread they belong to).
+		// Fall back to the cache-key thread_ts for plain thread replies that
+		// pre-date the dedicated column.
+		if msgThreadTS.String != "" {
+			m.ThreadTS = msgThreadTS.String
+		} else if threadTS != "" {
 			m.ThreadTS = threadTS
 		}
 		if replyUsers.Valid && replyUsers.String != "" {
@@ -406,8 +419,9 @@ func (s *sqliteStore) saveMessages(channelID, threadTS string, msgs []Message) e
 	stmt, err := tx.Prepare(`
 		INSERT INTO messages (channel_id, thread_ts, ts, ts_unix, user_id, username,
 		                     body, reply_count, reply_users, last_reply_ts,
-		                     reactions, edited, edited_ts, edit_history, deleted, files, is_bot)
-		VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+		                     reactions, edited, edited_ts, edit_history, deleted, files, is_bot,
+		                     is_thread_broadcast, msg_thread_ts)
+		VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
 		ON CONFLICT(channel_id, thread_ts, ts) DO UPDATE SET
 			user_id=excluded.user_id,
 			username=excluded.username,
@@ -421,7 +435,9 @@ func (s *sqliteStore) saveMessages(channelID, threadTS string, msgs []Message) e
 			edit_history=excluded.edit_history,
 			deleted=excluded.deleted,
 			files=excluded.files,
-			is_bot=excluded.is_bot`)
+			is_bot=excluded.is_bot,
+			is_thread_broadcast=excluded.is_thread_broadcast,
+			msg_thread_ts=excluded.msg_thread_ts`)
 	if err != nil {
 		return err
 	}
@@ -435,7 +451,8 @@ func (s *sqliteStore) saveMessages(channelID, threadTS string, msgs []Message) e
 		if _, err := stmt.Exec(channelID, threadTS, m.Timestamp, slackTSToUnix(m.Timestamp),
 			m.UserID, m.Username, m.Text, m.ReplyCount, string(replyUsers), m.LastReplyTS,
 			string(reactions), boolToInt(m.Edited), m.EditedTS, string(history),
-			boolToInt(m.Deleted), string(files), boolToInt(m.IsBot)); err != nil {
+			boolToInt(m.Deleted), string(files), boolToInt(m.IsBot),
+			boolToInt(m.IsThreadBroadcast), m.ThreadTS); err != nil {
 			return err
 		}
 	}

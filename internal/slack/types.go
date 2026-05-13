@@ -35,6 +35,11 @@ type Message struct {
 	Deleted     bool
 	Files       []File
 	IsBot       bool
+	// IsThreadBroadcast is true when the message was sent inside a thread
+	// with the "Also send to channel" checkbox enabled — Slack ships it
+	// twice (once into the thread, once into the channel with subtype
+	// "thread_broadcast"). The channel copy carries the flag.
+	IsThreadBroadcast bool
 }
 
 type Edit struct {

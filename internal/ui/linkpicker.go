@@ -11,33 +11,39 @@ import (
 )
 
 // LinkPicker is the overlay that appears when the user presses Enter on a
-// message containing more than one URL. Selecting a row hands the URL back
-// through onSelect; the host is responsible for actually opening it.
+// message and there's more than one thing that could be opened: multiple URLs,
+// or a mix of URL(s) and image attachment(s). Each row carries its own pick
+// action so the picker doesn't need to know whether it's opening a browser or
+// the in-app image viewer.
 type LinkPicker struct {
 	list     widget.List
-	rows     []*linkRow
+	rows     []*pickerRow
 	selected int
-	onSelect func(url string)
+	title    string
 }
 
-type linkRow struct {
-	url   string
-	click widget.Clickable
+type pickerRow struct {
+	label  string
+	onPick func()
+	click  widget.Clickable
 }
 
-func newLinkPicker(onSelect func(string)) *LinkPicker {
-	lp := &LinkPicker{onSelect: onSelect}
+func newLinkPicker() *LinkPicker {
+	lp := &LinkPicker{}
 	lp.list.Axis = layout.Vertical
 	return lp
 }
 
-// SetURLs replaces the picker's contents and resets the highlight to the top.
-func (l *LinkPicker) SetURLs(urls []string) {
-	rows := make([]*linkRow, 0, len(urls))
-	for _, u := range urls {
-		rows = append(rows, &linkRow{url: u})
+// SetItems replaces the picker's contents and resets the highlight to the top.
+// title is shown above the list (e.g. "Open link" or "Open").
+func (l *LinkPicker) SetItems(title string, rows []pickerRow) {
+	r := make([]*pickerRow, 0, len(rows))
+	for i := range rows {
+		row := rows[i]
+		r = append(r, &row)
 	}
-	l.rows = rows
+	l.title = title
+	l.rows = r
 	l.selected = 0
 	l.list.Position = layout.Position{}
 }
@@ -71,17 +77,17 @@ func (l *LinkPicker) MoveSelection(delta int) {
 	}
 }
 
-// Submit fires onSelect for the currently highlighted URL, if any.
+// Submit fires the pick action for the currently highlighted row, if any.
 func (l *LinkPicker) Submit() {
 	if l.selected < 0 || l.selected >= len(l.rows) {
 		return
 	}
-	if l.onSelect != nil {
-		l.onSelect(l.rows[l.selected].url)
+	if fn := l.rows[l.selected].onPick; fn != nil {
+		fn()
 	}
 }
 
-// Layout draws the picker. It owns a vertical list of URL rows with the
+// Layout draws the picker. It owns a vertical list of rows with the
 // highlighted one painted in the accent color.
 func (l *LinkPicker) Layout(gtx layout.Context, th *Theme) layout.Dimensions {
 	for i, r := range l.rows {
@@ -89,6 +95,10 @@ func (l *LinkPicker) Layout(gtx layout.Context, th *Theme) layout.Dimensions {
 			l.selected = i
 			l.Submit()
 		}
+	}
+	title := l.title
+	if title == "" {
+		title = "Open"
 	}
 	return paintedBg(gtx, th.Pal.Bg, func(gtx layout.Context) layout.Dimensions {
 		return layout.Inset{
@@ -99,11 +109,11 @@ func (l *LinkPicker) Layout(gtx layout.Context, th *Theme) layout.Dimensions {
 		}.Layout(gtx, func(gtx layout.Context) layout.Dimensions {
 			return layout.Flex{Axis: layout.Vertical}.Layout(gtx,
 				layout.Rigid(func(gtx layout.Context) layout.Dimensions {
-					title := material.Subtitle1(th.Mat, "Open link")
-					th.applyFont(&title, FontStyle{})
-					title.Color = th.Pal.TextStrong
-					title.Font.Weight = font.SemiBold
-					return title.Layout(gtx)
+					t := material.Subtitle1(th.Mat, title)
+					th.applyFont(&t, FontStyle{})
+					t.Color = th.Pal.TextStrong
+					t.Font.Weight = font.SemiBold
+					return t.Layout(gtx)
 				}),
 				layout.Rigid(func(gtx layout.Context) layout.Dimensions {
 					hint := material.Caption(th.Mat, "j/k or ^/v select | Enter open | h/q/Esc cancel")
@@ -121,7 +131,7 @@ func (l *LinkPicker) Layout(gtx layout.Context, th *Theme) layout.Dimensions {
 	})
 }
 
-func (l *LinkPicker) layoutRow(gtx layout.Context, th *Theme, idx int, r *linkRow) layout.Dimensions {
+func (l *LinkPicker) layoutRow(gtx layout.Context, th *Theme, idx int, r *pickerRow) layout.Dimensions {
 	active := idx == l.selected
 	bg := th.Pal.Bg
 	color := th.Pal.Link
@@ -137,7 +147,7 @@ func (l *LinkPicker) layoutRow(gtx layout.Context, th *Theme, idx int, r *linkRo
 				Left:   unit.Dp(12),
 				Right:  unit.Dp(12),
 			}.Layout(gtx, func(gtx layout.Context) layout.Dimensions {
-				lbl := material.Body2(th.Mat, fmt.Sprintf("%d. %s", idx+1, r.url))
+				lbl := material.Body2(th.Mat, fmt.Sprintf("%d. %s", idx+1, r.label))
 				th.applyFont(&lbl, FontStyle{})
 				lbl.Color = color
 				if active {
