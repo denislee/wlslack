@@ -2,11 +2,8 @@ package ui
 
 import (
 	"image"
-	"io"
-	"strings"
 
 	"gioui.org/font"
-	"gioui.org/io/clipboard"
 	"gioui.org/io/event"
 	"gioui.org/io/key"
 	"gioui.org/layout"
@@ -392,12 +389,7 @@ func (e *MessageEditor) copySelected(gtx layout.Context) {
 	if text == "" {
 		text = e.editor.Text()
 	}
-	if text != "" {
-		gtx.Execute(clipboard.WriteCmd{
-			Type: "application/text",
-			Data: io.NopCloser(strings.NewReader(text)),
-		})
-	}
+	writeClipboardText(gtx, text)
 }
 
 func (e *MessageEditor) Focus(gtx layout.Context) {

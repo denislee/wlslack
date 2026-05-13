@@ -438,20 +438,22 @@ func (f *Formatter) tokenize(text string) []Span {
 			break
 		}
 		start, end := pos+m[0], pos+m[1]
-		f.appendInline(&out, text[pos:start])
+		f.appendInline(&out, text[pos:start], 0, "")
 		body := reCodeBlock.FindStringSubmatch(text[start:end])
 		if len(body) >= 2 {
 			emit(body[1], StyleCodeBlock, "")
 		}
 		pos = end
 	}
-	f.appendInline(&out, text[pos:])
+	f.appendInline(&out, text[pos:], 0, "")
 	return out
 }
 
 // appendInline tokenizes a text run that has no fenced code blocks, then
-// appends the resulting spans onto out.
-func (f *Formatter) appendInline(out *[]Span, text string) {
+// appends the resulting spans onto out. baseStyle/baseLink propagate context
+// from an outer span (e.g. so markdown inside a <url|label> link is parsed
+// while every emitted child still carries the link's StyleLink + url).
+func (f *Formatter) appendInline(out *[]Span, text string, baseStyle StyleFlag, baseLink string) {
 	if text == "" {
 		return
 	}
@@ -459,7 +461,10 @@ func (f *Formatter) appendInline(out *[]Span, text string) {
 		if s == "" {
 			return
 		}
-		*out = append(*out, Span{Text: s, Style: style, Link: link})
+		if link == "" {
+			link = baseLink
+		}
+		*out = append(*out, Span{Text: s, Style: style | baseStyle, Link: link})
 	}
 
 	pos := 0
@@ -547,7 +552,9 @@ func (f *Formatter) appendInline(out *[]Span, text string) {
 			s, e := pos+m[0], pos+m[1]
 			url := text[pos+m[2] : pos+m[3]]
 			label := text[pos+m[4] : pos+m[5]]
-			try(cand{s, e, func() { emit(label, StyleLink, url) }})
+			try(cand{s, e, func() {
+				f.appendInline(out, label, baseStyle|StyleLink, url)
+			}})
 		}
 		if m := reURLNoLabel.FindStringSubmatchIndex(text[pos:]); m != nil {
 			s, e := pos+m[0], pos+m[1]

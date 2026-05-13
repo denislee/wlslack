@@ -51,6 +51,20 @@ func TestFormatSpans_Mentions(t *testing.T) {
 				{Text: "!", Style: 0},
 			},
 		},
+		{
+			input: "see <https://example.com|*Eng Weekly*> tomorrow",
+			expected: []Span{
+				{Text: "see ", Style: 0},
+				{Text: "Eng Weekly", Style: StyleLink | StyleBold, Link: "https://example.com"},
+				{Text: " tomorrow", Style: 0},
+			},
+		},
+		{
+			input: "<https://example.com|plain label>",
+			expected: []Span{
+				{Text: "plain label", Style: StyleLink, Link: "https://example.com"},
+			},
+		},
 	}
 
 	for _, tt := range tests {

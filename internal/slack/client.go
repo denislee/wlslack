@@ -7,6 +7,7 @@ import (
 	"io"
 	"log/slog"
 	"net/http"
+	"net/url"
 	"os"
 	"sort"
 	"strings"
@@ -1015,6 +1016,64 @@ func (c *Client) RemoveReaction(channelID, timestamp, emoji string) error {
 	return nil
 }
 
+// OpenConversation opens (or resumes) a DM or MPIM with the given user IDs.
+// One user → DM, two-or-more → MPIM. The returned Channel is added to the
+// cache so the sidebar can show it on the next publish.
+func (c *Client) OpenConversation(userIDs []string) (*Channel, error) {
+	if len(userIDs) == 0 {
+		return nil, errors.New("no users specified")
+	}
+	ch, _, _, err := c.api.OpenConversation(&slackapi.OpenConversationParameters{
+		Users:    userIDs,
+		ReturnIM: len(userIDs) == 1,
+	})
+	if err != nil {
+		return nil, fmt.Errorf("open conversation: %w", friendlyError(err))
+	}
+
+	out := &Channel{
+		ID:        ch.ID,
+		Name:      ch.Name,
+		IsIM:      ch.IsIM,
+		IsMPIM:    ch.IsMpIM,
+		IsPrivate: ch.IsPrivate,
+		Topic:     ch.Topic.Value,
+		Purpose:   ch.Purpose.Value,
+	}
+	if ch.IsIM {
+		out.UserID = ch.User
+		if u := c.cache.GetUser(ch.User); u != nil {
+			out.Name = imDisplayName(u, ch.User)
+		} else if out.Name == "" {
+			out.Name = ch.User
+		}
+	} else if ch.IsMpIM {
+		// MPIM name from Slack looks like "mpdm-foo--bar--baz-1"; rebuild a
+		// readable list of display names from the requested user IDs.
+		names := make([]string, 0, len(userIDs))
+		for _, uid := range userIDs {
+			if uid == c.selfID {
+				continue
+			}
+			if u, err := c.ResolveUser(uid); err == nil {
+				names = append(names, imDisplayName(u, uid))
+			} else {
+				names = append(names, uid)
+			}
+		}
+		sort.Strings(names)
+		if len(names) > 0 {
+			out.Name = strings.Join(names, ", ")
+		}
+	}
+
+	c.cache.SetChannels([]Channel{*out})
+	if onUpdate := c.cache.OnUpdate; onUpdate != nil {
+		onUpdate()
+	}
+	return out, nil
+}
+
 func (c *Client) MarkChannel(channelID, ts string) error {
 	// Optimistically clear the unread count in cache. This eliminates the
 	// necessity of managing the cache manually in the UI.
@@ -1098,6 +1157,17 @@ func (c *Client) Search(query string) ([]SearchResult, error) {
 			}
 		}
 
+		// The slack-go SearchMessage type doesn't expose thread_ts, but Slack
+		// encodes it in the permalink as ?thread_ts=… for any match that lives
+		// inside a thread. Recover it so callers can tell parent matches from
+		// reply matches and walk back to the parent when needed.
+		threadTS := ""
+		if match.Permalink != "" {
+			if u, err := url.Parse(match.Permalink); err == nil {
+				threadTS = u.Query().Get("thread_ts")
+			}
+		}
+
 		results = append(results, SearchResult{
 			ChannelID:   match.Channel.ID,
 			ChannelName: channelName,
@@ -1107,6 +1177,7 @@ func (c *Client) Search(query string) ([]SearchResult, error) {
 				UserID:    match.User,
 				Username:  match.Username,
 				Text:      match.Text,
+				ThreadTS:  threadTS,
 			},
 		})
 	}

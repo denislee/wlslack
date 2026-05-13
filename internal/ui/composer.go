@@ -7,12 +7,10 @@ import (
 	_ "image/jpeg"
 	_ "image/png"
 	"image/color"
-	"io"
 	"strings"
 	"sync"
 
 	"gioui.org/font"
-	"gioui.org/io/clipboard"
 	"gioui.org/io/event"
 	"gioui.org/io/key"
 	"gioui.org/layout"
@@ -829,10 +827,7 @@ func (c *Composer) VisualYank(gtx layout.Context) {
 	}
 	runes := []rune(c.editor.Text())
 	text := string(runes[lo:hi])
-	gtx.Execute(clipboard.WriteCmd{
-		Type: "application/text",
-		Data: io.NopCloser(strings.NewReader(text)),
-	})
+	writeClipboardText(gtx, text)
 }
 
 // VisualDelete removes the visually-selected text from the editor.

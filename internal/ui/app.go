@@ -9,6 +9,7 @@ import (
 	"os/exec"
 	"path/filepath"
 	"sort"
+	"strconv"
 	"strings"
 	"sync"
 	"sync/atomic"
@@ -50,6 +51,7 @@ type App struct {
 	messages       *MessagesView
 	composer       *Composer
 	switcher       *QuickSwitcher
+	newChatPicker  *NewChatPicker
 	linkPicker     *LinkPicker
 	imageViewer    *ImageViewer
 	messageEditor  *MessageEditor
@@ -71,6 +73,7 @@ type App struct {
 	// reads happen during Layout while writes trigger Invalidate, so a frame
 	// boundary acts as the sync point.
 	switcherOpen       bool
+	newChatPickerOpen  bool
 	linkPickerOpen     bool
 	imageViewerOpen    bool
 	messageEditorOpen  bool
@@ -92,6 +95,7 @@ type App struct {
 	initFocused             bool
 	pendFocusKeyTag         bool
 	pendFocusSwitcher       bool
+	pendFocusNewChatPicker  bool
 	pendFocusReactionPicker bool
 	pendFocusMessageEditor  bool
 
@@ -119,6 +123,14 @@ type App struct {
 	rotatingScanIdx int
 
 	fetchingUnreads atomic.Bool
+
+	// Threads view caching: search API calls are tier-2 rate limited and
+	// each fetch issues 5 queries, so we coalesce re-fetches within a TTL
+	// and re-emit the cached slice instead.
+	fetchingThreads  atomic.Bool
+	threadsMu        sync.Mutex
+	threadsCache     []slack.Message
+	threadsCacheTime time.Time
 
 	// sidebarPublish coalesces sidebar updates so multiple concurrent
 	// cache mutations (priority tick, mention scans, active-channel poll)
@@ -170,6 +182,7 @@ func Run(client *slack.Client, cfg *config.Config) error {
 	a.composer = newComposer()
 	a.uploadProgress.Store(-1)
 	a.switcher = newQuickSwitcher(a.onSwitcherSelect, a.onSwitcherSearch)
+	a.newChatPicker = newNewChatPicker(a.onNewChatSubmit)
 	a.linkPicker = newLinkPicker(a.onLinkPickerSelect)
 	a.imageViewer = newImageViewer(images)
 	a.messageEditor = newMessageEditor()
@@ -360,6 +373,9 @@ func (a *App) layout(gtx layout.Context) layout.Dimensions {
 					if a.switcherOpen {
 						return a.switcher.Layout(gtx, a.th)
 					}
+					if a.newChatPickerOpen {
+						return a.newChatPicker.Layout(gtx, a.th)
+					}
 					if a.linkPickerOpen {
 						return a.linkPicker.Layout(gtx, a.th)
 					}
@@ -437,6 +453,10 @@ func (a *App) applyPendingFocus(gtx layout.Context) {
 		gtx.Execute(key.FocusCmd{Tag: a.switcher.Editor()})
 		a.pendFocusSwitcher = false
 	}
+	if a.pendFocusNewChatPicker {
+		gtx.Execute(key.FocusCmd{Tag: a.newChatPicker.Editor()})
+		a.pendFocusNewChatPicker = false
+	}
 	if a.pendFocusReactionPicker {
 		gtx.Execute(key.FocusCmd{Tag: a.reactionPicker.Editor()})
 		a.pendFocusReactionPicker = false
@@ -456,6 +476,8 @@ func (a *App) handleKeys(gtx layout.Context) {
 	composerFocused := gtx.Source.Focused(&a.composer.editor)
 	switcherEditor := a.switcher.Editor()
 	switcherFocused := gtx.Source.Focused(switcherEditor)
+	newChatEditor := a.newChatPicker.Editor()
+	newChatFocused := gtx.Source.Focused(newChatEditor)
 	reactionEditor := a.reactionPicker.Editor()
 	reactionFocused := gtx.Source.Focused(reactionEditor)
 	messageEditorFocused := gtx.Source.Focused(a.messageEditor.FocusTag())
@@ -465,6 +487,8 @@ func (a *App) handleKeys(gtx layout.Context) {
 		key.Filter{Name: "K", Required: key.ModCtrl},
 		// Global force-refresh shortcut.
 		key.Filter{Name: "R", Required: key.ModCtrl},
+		// Global new-chat shortcut.
+		key.Filter{Name: "N", Required: key.ModCtrl | key.ModShift},
 	}
 	if a.messageEditorOpen {
 		meTag := a.messageEditor.FocusTag()
@@ -496,6 +520,28 @@ func (a *App) handleKeys(gtx layout.Context) {
 			key.Filter{Focus: switcherEditor, Name: "C", Required: key.ModCtrl},
 		)
 	}
+	if a.newChatPickerOpen {
+		filters = append(filters,
+			key.Filter{Focus: newChatEditor, Name: key.NameEscape},
+			key.Filter{Focus: newChatEditor, Name: "[", Required: key.ModCtrl},
+			key.Filter{Focus: newChatEditor, Name: key.NameUpArrow},
+			key.Filter{Focus: newChatEditor, Name: key.NameDownArrow},
+			key.Filter{Focus: newChatEditor, Name: key.NameLeftArrow, Required: key.ModCtrl},
+			key.Filter{Focus: newChatEditor, Name: key.NameRightArrow, Required: key.ModCtrl},
+			key.Filter{Focus: newChatEditor, Name: key.NameReturn},
+			key.Filter{Focus: newChatEditor, Name: key.NameTab, Optional: key.ModShift},
+			key.Filter{Focus: newChatEditor, Name: "N", Required: key.ModCtrl},
+			key.Filter{Focus: newChatEditor, Name: "P", Required: key.ModCtrl},
+			key.Filter{Focus: newChatEditor, Name: "Y", Required: key.ModCtrl},
+			key.Filter{Focus: newChatEditor, Name: "W", Required: key.ModCtrl},
+			key.Filter{Focus: newChatEditor, Name: key.NameDeleteBackward, Required: key.ModCtrl},
+			key.Filter{Focus: newChatEditor, Name: "A", Required: key.ModCtrl},
+			key.Filter{Focus: newChatEditor, Name: "E", Required: key.ModCtrl},
+			key.Filter{Focus: newChatEditor, Name: "F", Required: key.ModCtrl},
+			key.Filter{Focus: newChatEditor, Name: "B", Required: key.ModCtrl},
+			key.Filter{Focus: newChatEditor, Name: "C", Required: key.ModCtrl},
+		)
+	}
 	if a.reactionPickerOpen {
 		filters = append(filters,
 			key.Filter{Focus: reactionEditor, Name: key.NameEscape},
@@ -520,7 +566,7 @@ func (a *App) handleKeys(gtx layout.Context) {
 	if composerFocused {
 		filters = append(filters, a.composer.KeyFilters()...)
 	}
-	if !composerFocused && !switcherFocused && !reactionFocused && !messageEditorFocused && !a.messageEditorOpen {
+	if !composerFocused && !switcherFocused && !newChatFocused && !reactionFocused && !messageEditorFocused && !a.messageEditorOpen {
 		// No Focus on these filters: any non-text-editing focus state (e.g. a
 		// channel-row Clickable that grabbed focus on click) still routes
 		// j/k/h/l/i here. Without this, clicking a row would silently disable
@@ -605,6 +651,12 @@ func (a *App) handleKeys(gtx layout.Context) {
 			} else {
 				a.openSwitcher()
 			}
+		case kev.Name == "N" && kev.Modifiers.Contain(key.ModCtrl) && kev.Modifiers.Contain(key.ModShift):
+			if a.newChatPickerOpen {
+				a.closeNewChatPicker()
+			} else {
+				a.openNewChatPicker()
+			}
 		case kev.Name == "R" && kev.Modifiers.Contain(key.ModCtrl):
 			a.forceRefresh()
 		case kev.Name == key.NameEscape || (kev.Name == "[" && kev.Modifiers.Contain(key.ModCtrl)):
@@ -613,6 +665,8 @@ func (a *App) handleKeys(gtx layout.Context) {
 				a.closeSettings()
 			case a.switcherOpen:
 				a.closeSwitcher()
+			case a.newChatPickerOpen:
+				a.closeNewChatPicker()
 			case a.reactionPickerOpen:
 				a.closeReactionPicker()
 			case a.linkPickerOpen:
@@ -665,9 +719,13 @@ func (a *App) handleKeys(gtx layout.Context) {
 			switch {
 			case (kev.Name == "V" || kev.Name == "v") && kev.Modifiers.Contain(key.ModCtrl):
 				slog.Info("Ctrl+V detected", "tag", fmt.Sprintf("%p", &a.composerPasteTag))
-				if !a.tryWaylandPaste() {
-					gtx.Execute(clipboard.ReadCmd{Tag: &a.composerPasteTag})
-				}
+				// Gio handles text and text/uri-list via the async ReadCmd path
+				// (see handleClipboardEvents). wl-paste runs off the UI thread to
+				// pull image content for attachment — calling it synchronously
+				// here deadlocks when this app owns the clipboard, because the
+				// compositor asks the same event loop to serve the source.
+				gtx.Execute(clipboard.ReadCmd{Tag: &a.composerPasteTag})
+				go a.tryWaylandPasteImage()
 			case kev.Name == "T" && kev.Modifiers.Contain(key.ModCtrl):
 				a.composer.TranslateToEnglish(func(text string, setFeedback func(string), done func(string, error)) {
 					urls := llm.ExtractURLs(text)
@@ -803,6 +861,44 @@ func (a *App) handleKeys(gtx layout.Context) {
 		case a.switcherOpen && kev.Name == key.NameTab:
 			a.switcher.ToggleTab()
 			a.w.Invalidate()
+		case a.newChatPickerOpen && (kev.Name == key.NameUpArrow || (kev.Name == "P" && kev.Modifiers.Contain(key.ModCtrl))):
+			a.newChatPicker.MoveSelection(-1)
+			a.w.Invalidate()
+		case a.newChatPickerOpen && (kev.Name == key.NameDownArrow || (kev.Name == "N" && kev.Modifiers.Contain(key.ModCtrl))):
+			a.newChatPicker.MoveSelection(1)
+			a.w.Invalidate()
+		case a.newChatPickerOpen && kev.Name == key.NameLeftArrow && kev.Modifiers.Contain(key.ModCtrl):
+			a.newChatPicker.MoveWord(-1)
+			a.w.Invalidate()
+		case a.newChatPickerOpen && kev.Name == key.NameRightArrow && kev.Modifiers.Contain(key.ModCtrl):
+			a.newChatPicker.MoveWord(1)
+			a.w.Invalidate()
+		case a.newChatPickerOpen && (kev.Name == "W" || (kev.Name == key.NameDeleteBackward && kev.Modifiers.Contain(key.ModCtrl))):
+			a.newChatPicker.DeleteLastWord()
+			a.w.Invalidate()
+		case a.newChatPickerOpen && kev.Name == key.NameTab && kev.Modifiers.Contain(key.ModShift):
+			a.newChatPicker.Backspace()
+			a.w.Invalidate()
+		case a.newChatPickerOpen && kev.Name == "A" && kev.Modifiers.Contain(key.ModCtrl):
+			a.newChatPicker.SelectAll()
+			a.w.Invalidate()
+		case a.newChatPickerOpen && kev.Name == "E" && kev.Modifiers.Contain(key.ModCtrl):
+			a.newChatPicker.MoveToEnd()
+			a.w.Invalidate()
+		case a.newChatPickerOpen && kev.Name == "F" && kev.Modifiers.Contain(key.ModCtrl):
+			a.newChatPicker.MoveCursor(1)
+			a.w.Invalidate()
+		case a.newChatPickerOpen && kev.Name == "B" && kev.Modifiers.Contain(key.ModCtrl):
+			a.newChatPicker.MoveCursor(-1)
+			a.w.Invalidate()
+		case a.newChatPickerOpen && kev.Name == "C" && kev.Modifiers.Contain(key.ModCtrl):
+			a.newChatPicker.Clear()
+			a.w.Invalidate()
+		case a.newChatPickerOpen && (kev.Name == key.NameTab || (kev.Name == "Y" && kev.Modifiers.Contain(key.ModCtrl))):
+			a.newChatPicker.TogglePicked()
+			a.w.Invalidate()
+		case a.newChatPickerOpen && kev.Name == key.NameReturn:
+			a.newChatPicker.Submit()
 		case a.reactionPickerOpen && (kev.Name == key.NameUpArrow || (kev.Name == "P" && kev.Modifiers.Contain(key.ModCtrl))):
 			a.reactionPicker.MoveSelection(-1)
 			a.w.Invalidate()
@@ -916,10 +1012,7 @@ func (a *App) handleKeys(gtx layout.Context) {
 		case kev.Name == "Y":
 			if a.messages.AuthorOpen() {
 				if v, ok := a.messages.AuthorSelectedValue(); ok && v != "" {
-					gtx.Execute(clipboard.WriteCmd{
-						Type: "application/text",
-						Data: io.NopCloser(strings.NewReader(v)),
-					})
+					writeClipboardText(gtx, v)
 				}
 			} else if a.focusPane == paneMessages {
 				msg, ts, ok := a.messages.SelectedMessage()
@@ -940,12 +1033,7 @@ func (a *App) handleKeys(gtx layout.Context) {
 							text += f.PreferredImageURL()
 						}
 					}
-					if text != "" {
-						gtx.Execute(clipboard.WriteCmd{
-							Type: "application/text",
-							Data: io.NopCloser(strings.NewReader(text)),
-						})
-					}
+					writeClipboardText(gtx, text)
 				}
 			}
 		case kev.Name == "R":
@@ -1010,6 +1098,42 @@ func (a *App) onSwitcherSelect(id string, ts string) {
 	}
 	a.setFocusPane(paneMessages)
 	a.closeSwitcher()
+}
+
+func (a *App) openNewChatPicker() {
+	a.newChatPicker.Reset()
+	a.newChatPicker.SetUsers(a.client.Cache().GetAllUsers(), a.client.GetSelfID())
+	a.newChatPickerOpen = true
+	a.pendFocusNewChatPicker = true
+	a.w.Invalidate()
+}
+
+func (a *App) closeNewChatPicker() {
+	a.newChatPickerOpen = false
+	a.pendFocusKeyTag = true
+	a.w.Invalidate()
+}
+
+func (a *App) onNewChatSubmit(userIDs []string) {
+	if len(userIDs) == 0 {
+		return
+	}
+	a.closeNewChatPicker()
+	a.startTask("newchat", "Opening conversation")
+	go func() {
+		defer a.endTask("newchat")
+		ch, err := a.client.OpenConversation(userIDs)
+		if err != nil {
+			slog.Error("open conversation failed", "error", err, "users", userIDs)
+			a.startTask("newchat_err", "Open chat failed: "+err.Error())
+			go func() { time.Sleep(4 * time.Second); a.endTask("newchat_err") }()
+			return
+		}
+		a.requestSidebarPublish()
+		a.onChannelSelectWithContext(ch.ID, "")
+		a.setFocusPane(paneMessages)
+		a.w.Invalidate()
+	}()
 }
 
 func (a *App) onSwitcherSearch(query string) {
@@ -1537,7 +1661,7 @@ func (a *App) onChannelSelectWithContext(id string, ts string) {
 	a.editingTS = ""
 	a.editingCh = ""
 	if id == "__UNREADS__" {
-		a.messages.SetHeader("Mentions", "Consolidated view of all unread messages with mentions")
+		a.messages.SetHeader("Mentions", "History of all messages with mentions (read and unread)")
 		a.messages.SetMessages(nil)
 		a.w.Invalidate()
 
@@ -2127,6 +2251,11 @@ func (a *App) pollActiveChannel() {
 		default:
 			a.fetchMessages(id)
 		}
+		if a.messages.InThread() {
+			if chID, threadTS := a.messages.ThreadInfo(); chID != "" && threadTS != "" {
+				a.fetchThread(chID, threadTS)
+			}
+		}
 	}
 }
 
@@ -2222,21 +2351,22 @@ func (a *App) fetchAllUnreads() {
 	selfID := a.client.GetSelfID()
 	groups := a.client.Cache().GetAllUserGroups()
 
+	// Surface every cached mention regardless of read state — the view is a
+	// history of @-mentions and DMs that the user can scroll back through.
+	// The natural bound is MessageRetention (cache prune horizon).
 	for _, ch := range channels {
-		if ch.UnreadCount > 0 {
-			msgs := a.client.Cache().GetMessages(ch.ID)
-			isDM := ch.IsIM || ch.IsMPIM
-			for _, m := range msgs {
-				if m.Timestamp > ch.LastReadTS && (isDM || a.isMentionWithContext(m, selfID, groups)) {
-					m.ChannelID = ch.ID
-					m.ChannelName = ch.Name
-					all = append(all, m)
-				}
+		msgs := a.client.Cache().GetMessages(ch.ID)
+		isDM := ch.IsIM || ch.IsMPIM
+		for _, m := range msgs {
+			if isDM || a.isMentionWithContext(m, selfID, groups) {
+				m.ChannelID = ch.ID
+				m.ChannelName = ch.Name
+				all = append(all, m)
 			}
 		}
 	}
 
-	// Also include unread threads from search.
+	// Also include thread roots from search that may not be in the local cache.
 	if results, err := a.client.Search("has:thread OR (is:dm has:thread)"); err == nil {
 		for _, r := range results {
 			ch := a.client.Cache().GetChannel(r.ChannelID)
@@ -2245,7 +2375,7 @@ func (a *App) fetchAllUnreads() {
 			}
 			isDM := ch.IsIM || ch.IsMPIM
 			isMention := a.isMention(r.Message)
-			if (isDM || isMention) && r.Message.LastReplyTS > ch.LastReadTS {
+			if isDM || isMention {
 				// Avoid duplicates
 				found := false
 				for _, m := range all {
@@ -2274,37 +2404,186 @@ func (a *App) fetchAllUnreads() {
 	}
 }
 
+// threadsCacheTTL is how long a fetched Threads result stays fresh before a
+// new search round is allowed. Tuned to stay well under Slack's tier-2 rate
+// limit given that each fetch issues ~5 search calls.
+const threadsCacheTTL = 60 * time.Second
+
+// threadsWindow bounds the Threads view to the last 7 days, matching the
+// local message retention so on-disk cache and search results agree.
+const threadsWindow = 7 * 24 * time.Hour
+
 func (a *App) fetchAllThreads() {
-	a.startTask("threads", "Fetching threads")
-	defer a.endTask("threads")
-	// Note: Slack's search API is used as a fallback since there's no direct "all threads" API.
-	results, err := a.client.Search("has:thread OR (is:dm has:thread)")
-	if err != nil {
-		slog.Error("fetchAllThreads failed", "error", err)
+	selfID := a.client.GetSelfID()
+	if selfID == "" {
+		slog.Error("fetchAllThreads: no self user id")
 		return
 	}
+
+	// Serve from the in-memory cache if the last fetch is still fresh. This
+	// avoids burning rate limit on the polling ticker and on rapid view
+	// switches.
+	a.threadsMu.Lock()
+	if !a.threadsCacheTime.IsZero() && time.Since(a.threadsCacheTime) < threadsCacheTTL {
+		cached := a.threadsCache
+		a.threadsMu.Unlock()
+		if a.getActiveID() == "__THREADS__" && a.messages.SetMessages(cached) {
+			a.w.Invalidate()
+		}
+		return
+	}
+	a.threadsMu.Unlock()
+
+	// Single-flight: drop concurrent calls. A new fetch will run when the
+	// next caller arrives after the in-flight one finishes (and either the
+	// TTL has rolled or the cache miss path runs again).
+	if !a.fetchingThreads.CompareAndSwap(false, true) {
+		return
+	}
+	defer a.fetchingThreads.Store(false)
+
+	a.startTask("threads", "Fetching threads")
+	defer a.endTask("threads")
+
+	// Slack's `after:` modifier is exclusive of the named day, so subtract an
+	// extra day to ensure the full 7-day window is covered.
+	after := time.Now().Add(-threadsWindow - 24*time.Hour).Format("2006-01-02")
+	afterMod := " after:" + after
+
 	var msgs []slack.Message
-	for _, r := range results {
-		m := r.Message
-		m.ChannelID = r.ChannelID
-		m.ChannelName = r.ChannelName
-		// Search results for "has:thread" are by definition thread roots (or
-		// replies, but we treat them as roots). UI needs ReplyCount > 0 to
-		// show the thread indicator.
-		m.ReplyCount = 1
+	seen := make(map[string]bool) // channelID + parent ts
+	add := func(m slack.Message, chID, chName string) {
 		if m.ThreadTS == "" {
 			m.ThreadTS = m.Timestamp
 		}
+		key := chID + "|" + m.ThreadTS
+		if seen[key] {
+			return
+		}
+		seen[key] = true
+		m.ChannelID = chID
+		m.ChannelName = chName
+		if m.ReplyCount == 0 {
+			m.ReplyCount = 1
+		}
 		msgs = append(msgs, m)
 	}
+	resolveAndAdd := func(r slack.SearchResult) {
+		threadTS := r.Message.ThreadTS
+		if threadTS == "" || threadTS == r.Message.Timestamp {
+			add(r.Message, r.ChannelID, r.ChannelName)
+			return
+		}
+		if seen[r.ChannelID+"|"+threadTS] {
+			return
+		}
+		// GetThreadReplies is itself cached client-side, so repeated walks
+		// across fetches hit the in-memory thread map instead of the API.
+		replies, err := a.client.GetThreadReplies(r.ChannelID, threadTS)
+		if err != nil || len(replies) == 0 {
+			slog.Debug("fetch thread parent failed", "channel", r.ChannelID, "thread", threadTS, "error", err)
+			return
+		}
+		add(replies[0], r.ChannelID, r.ChannelName)
+	}
+
+	// 1. Thread parents authored by the user.
+	if results, err := a.client.Search("from:<@" + selfID + "> has:thread" + afterMod); err != nil {
+		slog.Debug("threads from-self search failed", "error", err)
+	} else {
+		for _, r := range results {
+			add(r.Message, r.ChannelID, r.ChannelName)
+		}
+	}
+	// 2. Threads where the user replied — scan recent user-authored messages
+	//    and walk any that live inside a thread back to the parent.
+	if results, err := a.client.Search("from:<@" + selfID + ">" + afterMod); err != nil {
+		slog.Debug("threads from-self all search failed", "error", err)
+	} else {
+		for _, r := range results {
+			if r.Message.ThreadTS == "" {
+				continue
+			}
+			resolveAndAdd(r)
+		}
+	}
+	// 3. Threads where the user is mentioned (covers reply mentions too).
+	if results, err := a.client.Search("<@" + selfID + ">" + afterMod); err != nil {
+		slog.Debug("threads mention search failed", "error", err)
+	} else {
+		for _, r := range results {
+			resolveAndAdd(r)
+		}
+	}
+	// 4. DM and MPIM threads — the user is a participant by definition.
+	for _, q := range []string{"is:dm has:thread" + afterMod, "is:mpim has:thread" + afterMod} {
+		results, err := a.client.Search(q)
+		if err != nil {
+			slog.Debug("threads dm search failed", "query", q, "error", err)
+			continue
+		}
+		for _, r := range results {
+			add(r.Message, r.ChannelID, r.ChannelName)
+		}
+	}
+	// 5. Merge locally cached thread roots so threads stay visible after they
+	//    fall out of Slack's search window. Filter to threads the user is
+	//    actually involved in (authored parent, or DM/MPIM where the user is
+	//    a participant by definition). Threads the user only replied to are
+	//    covered by query 2 above; we skip the per-thread GetThread disk walk
+	//    here to keep the merge fast across large workspaces.
+	cutoff := time.Now().Add(-threadsWindow).Unix()
+	for _, ch := range a.client.Cache().GetAllChannels() {
+		for _, m := range a.client.Cache().GetMessages(ch.ID) {
+			if m.ReplyCount == 0 && m.ThreadTS == "" {
+				continue
+			}
+			if slackTSUnix(m.Timestamp) < cutoff {
+				continue
+			}
+			threadTS := m.ThreadTS
+			if threadTS == "" {
+				threadTS = m.Timestamp
+			}
+			if seen[ch.ID+"|"+threadTS] {
+				continue
+			}
+			if ch.IsIM || ch.IsMPIM || m.UserID == selfID {
+				add(m, ch.ID, ch.Name)
+			}
+		}
+	}
 	sort.Slice(msgs, func(i, j int) bool {
-		return msgs[i].Timestamp > msgs[j].Timestamp
+		return msgs[i].Timestamp < msgs[j].Timestamp
 	})
+
+	a.threadsMu.Lock()
+	a.threadsCache = msgs
+	a.threadsCacheTime = time.Now()
+	a.threadsMu.Unlock()
+
 	if a.getActiveID() == "__THREADS__" {
 		if a.messages.SetMessages(msgs) {
 			a.w.Invalidate()
 		}
 	}
+}
+
+// slackTSUnix parses a Slack timestamp ("1700000000.000123") to a unix second.
+// Returns 0 on parse failure so the caller treats unparseable rows as ancient.
+func slackTSUnix(ts string) int64 {
+	if ts == "" {
+		return 0
+	}
+	dot := strings.IndexByte(ts, '.')
+	if dot < 0 {
+		dot = len(ts)
+	}
+	n, err := strconv.ParseInt(ts[:dot], 10, 64)
+	if err != nil {
+		return 0
+	}
+	return n
 }
 
 func (a *App) handleClipboardEvents(gtx layout.Context) {
@@ -2412,57 +2691,50 @@ func (a *App) onAttach() {
 	}()
 }
 
-func (a *App) tryWaylandPaste() bool {
+// tryWaylandPasteImage shells out to wl-paste to pull image content off the
+// Wayland clipboard for attachment. MUST be called from a goroutine, never
+// from the UI/event loop: wl-paste blocks until the compositor returns data,
+// and when this app owns the clipboard the compositor needs the same event
+// loop to serve the source — running it on the UI thread deadlocks.
+// Text/uri-list pastes are handled by Gio's async ReadCmd path.
+func (a *App) tryWaylandPasteImage() {
 	if os.Getenv("WAYLAND_DISPLAY") == "" {
-		return false
+		return
 	}
 
-	// Try wl-paste
-	cmd := exec.Command("wl-paste", "--list-types")
-	out, err := cmd.Output()
+	out, err := exec.Command("wl-paste", "--list-types").Output()
 	if err != nil {
-		return false
+		return
 	}
 
-	types := strings.Split(strings.TrimSpace(string(out)), "\n")
 	typeMap := make(map[string]bool)
-	for _, t := range types {
+	for _, t := range strings.Split(strings.TrimSpace(string(out)), "\n") {
 		typeMap[t] = true
 	}
 
-	// Priority to images
 	imageTypes := []string{"image/png", "image/jpeg", "image/gif", "image/bmp", "image/tiff"}
 	for _, mime := range imageTypes {
-		if typeMap[mime] {
-			data, err := exec.Command("wl-paste", "--type", mime).Output()
-			if err == nil {
-				ext := "png"
-				if strings.Contains(mime, "jpeg") {
-					ext = "jpg"
-				} else if strings.Contains(mime, "gif") {
-					ext = "gif"
-				} else if strings.Contains(mime, "bmp") {
-					ext = "bmp"
-				} else if strings.Contains(mime, "tiff") {
-					ext = "tiff"
-				}
-				filename := fmt.Sprintf("pasted_image_%s.%s", time.Now().Format("20060102_150405"), ext)
-				a.composer.AddAttachment(filename, data)
-				a.w.Invalidate()
-				return true
-			}
+		if !typeMap[mime] {
+			continue
 		}
-	}
-
-	// Fallback to text
-	if typeMap["text/plain"] || typeMap["UTF8_STRING"] {
-		data, err := exec.Command("wl-paste").Output()
-		if err == nil {
-			a.composer.editor.Insert(string(data))
-			a.w.Invalidate()
-			return true
+		data, err := exec.Command("wl-paste", "--type", mime).Output()
+		if err != nil {
+			continue
 		}
+		ext := "png"
+		switch {
+		case strings.Contains(mime, "jpeg"):
+			ext = "jpg"
+		case strings.Contains(mime, "gif"):
+			ext = "gif"
+		case strings.Contains(mime, "bmp"):
+			ext = "bmp"
+		case strings.Contains(mime, "tiff"):
+			ext = "tiff"
+		}
+		filename := fmt.Sprintf("pasted_image_%s.%s", time.Now().Format("20060102_150405"), ext)
+		a.composer.AddAttachment(filename, data)
+		a.w.Invalidate()
+		return
 	}
-
-	return false
 }
