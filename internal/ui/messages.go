@@ -52,6 +52,10 @@ type MessagesView struct {
 	threadList     widget.List
 	threadRows     []*messageRow
 	threadSelected int
+	// threadLoaded flips true once the first SetThreadMessages after
+	// OpenThread arrives. Before that, the row set only contains the parent
+	// seed and growth shouldn't count as a "new reply" for auto-scroll.
+	threadLoaded bool
 
 	// Author detail panel: opened with 'l' on a selected thread message,
 	// shows the author's profile fields. j/k walk the field list, 'y'
@@ -63,6 +67,11 @@ type MessagesView struct {
 	authorName     string // display name shown next to the avatar
 
 	deletePendingTS string
+
+	// autoScroll mirrors Theme.AutoScrollOnNewMessage. When true, newly
+	// arrived messages re-pin the list to the bottom; when false, the user's
+	// scroll position is preserved as new messages come in.
+	autoScroll bool
 
 	images *slack.ImageLoader
 }
@@ -81,12 +90,24 @@ type messageRow struct {
 }
 
 func newMessagesView(images *slack.ImageLoader) *MessagesView {
-	mv := &MessagesView{images: images, selected: -1, threadSelected: -1}
+	mv := &MessagesView{images: images, selected: -1, threadSelected: -1, autoScroll: true}
 	mv.list.Axis = layout.Vertical
 	mv.list.ScrollToEnd = true
 	mv.threadList.Axis = layout.Vertical
 	mv.threadList.ScrollToEnd = true
 	return mv
+}
+
+// SetAutoScroll toggles the "follow tail on new message" behavior for the
+// thread reply list. The main channel list always tails the latest message;
+// only the thread pane honors this preference.
+func (m *MessagesView) SetAutoScroll(on bool) {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	m.autoScroll = on
+	if !on {
+		m.threadList.ScrollToEnd = false
+	}
 }
 
 // SetFocused toggles the visual highlight on the selected row. Called by the
@@ -109,6 +130,7 @@ func (m *MessagesView) Reset() {
 	m.pendFocusLast = false
 	m.rows = nil
 	m.threadActive = false
+	m.threadLoaded = false
 	m.threadChannel = ""
 	m.threadTS = ""
 	m.threadRows = nil
@@ -289,6 +311,7 @@ func (m *MessagesView) OpenThread(channelID string) (string, string, bool) {
 		ts = r.msg.Timestamp
 	}
 	m.threadActive = true
+	m.threadLoaded = false
 	m.threadChannel = channelID
 	m.threadTS = ts
 	// Seed with the selected message so the parent is visible immediately,
@@ -316,6 +339,7 @@ func (m *MessagesView) CloseThread() bool {
 		return false
 	}
 	m.threadActive = false
+	m.threadLoaded = false
 	m.threadChannel = ""
 	m.threadTS = ""
 	m.threadRows = nil
@@ -457,6 +481,47 @@ func (m *MessagesView) MoveAuthorSelection(delta int) bool {
 	return true
 }
 
+// AuthorPhoto returns a synthetic File pointing at the highest-resolution
+// avatar variant we can derive from the cached profile URL, so the image
+// viewer can open the user's photo in a lightbox. Returns false when the
+// panel is closed or no avatar is known.
+func (m *MessagesView) AuthorPhoto() (slack.File, bool) {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	if !m.authorOpen || m.authorAvatar == "" {
+		return slack.File{}, false
+	}
+	name := m.authorName
+	if name == "" {
+		name = "profile photo"
+	}
+	return slack.File{
+		Name:     name,
+		URL:      hiResAvatarURL(m.authorAvatar),
+		Mimetype: "image/jpeg",
+	}, true
+}
+
+// hiResAvatarURL rewrites a Slack `avatars.slack-edge.com` URL to point at
+// the original-resolution variant. Slack publishes the same image at several
+// fixed sizes (`_24` ... `_1024`, plus `_original`) and we cache the 192-px
+// version for the inline avatar; the lightbox wants the largest available.
+// Anything that doesn't match the size suffix pattern is returned unchanged.
+func hiResAvatarURL(url string) string {
+	if url == "" {
+		return url
+	}
+	for _, size := range []string{"_192", "_512", "_1024", "_72", "_48"} {
+		for _, ext := range []string{".jpg", ".jpeg", ".png", ".gif"} {
+			suffix := size + ext
+			if strings.HasSuffix(url, suffix) {
+				return strings.TrimSuffix(url, suffix) + "_original" + ext
+			}
+		}
+	}
+	return url
+}
+
 // AuthorSelectedValue returns the value of the highlighted field, used by 'y'
 // to copy to the clipboard.
 func (m *MessagesView) AuthorSelectedValue() (string, bool) {
@@ -505,6 +570,8 @@ func (m *MessagesView) SetThreadMessages(msgs []slack.Message) bool {
 		selectedTS = m.threadRows[m.threadSelected].msg.Timestamp
 	}
 	wasEmpty := len(m.threadRows) == 0
+	oldLen := len(m.threadRows)
+	wasLoaded := m.threadLoaded
 	out := make([]*messageRow, 0, len(msgs))
 	for _, msg := range msgs {
 		r, ok := old[msg.Timestamp]
@@ -518,6 +585,16 @@ func (m *MessagesView) SetThreadMessages(msgs []slack.Message) bool {
 		out = append(out, r)
 	}
 	m.threadRows = out
+	m.threadLoaded = true
+	// Only treat growth as a live new reply once the thread has been hydrated
+	// past its parent-seed state. Opening a thread that already has replies
+	// is an initial load and should leave the view at the parent (top).
+	if wasLoaded && len(out) > oldLen {
+		m.threadList.ScrollToEnd = m.autoScroll
+		if m.autoScroll {
+			m.threadList.Position.BeforeEnd = false
+		}
+	}
 	m.threadSelected = -1
 	if selectedTS != "" {
 		for i, r := range out {

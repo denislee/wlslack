@@ -30,6 +30,7 @@ type SettingsScreen struct {
 	toggleStatusBar widget.Clickable
 	toggleLinkUnfurl  widget.Clickable
 	toggleMediaUnfurl widget.Clickable
+	toggleAutoScroll  widget.Clickable
 }
 
 type settingsRow struct {
@@ -149,6 +150,10 @@ func (s *SettingsScreen) Layout(gtx layout.Context) layout.Dimensions {
 	}
 	if s.toggleMediaUnfurl.Clicked(gtx) {
 		th.DisableMediaUnfurl = !th.DisableMediaUnfurl
+		dirty = true
+	}
+	if s.toggleAutoScroll.Clicked(gtx) {
+		th.AutoScrollOnNewMessage = !th.AutoScrollOnNewMessage
 		dirty = true
 	}
 
@@ -361,6 +366,25 @@ func (s *SettingsScreen) layoutThemeToggles(gtx layout.Context, th *Theme) layou
 						label = "off"
 					}
 					return s.button(gtx, th, &s.toggleMediaUnfurl, label)
+				}),
+			)
+		}),
+		layout.Rigid(layout.Spacer{Height: unit.Dp(6)}.Layout),
+		layout.Rigid(func(gtx layout.Context) layout.Dimensions {
+			return layout.Flex{Alignment: layout.Middle}.Layout(gtx,
+				layout.Rigid(func(gtx layout.Context) layout.Dimensions {
+					lbl := material.Body2(th.Mat, "Auto-scroll to new messages")
+					th.applyFont(&lbl, FontStyle{})
+					lbl.Color = th.Pal.TextDim
+					gtx.Constraints.Min.X = gtx.Dp(unit.Dp(160))
+					return lbl.Layout(gtx)
+				}),
+				layout.Rigid(func(gtx layout.Context) layout.Dimensions {
+					label := "off"
+					if th.AutoScrollOnNewMessage {
+						label = "on"
+					}
+					return s.button(gtx, th, &s.toggleAutoScroll, label)
 				}),
 			)
 		}),

@@ -195,6 +195,7 @@ type Theme struct {
 	ShowStatusBar          bool
 	DisableLinkUnfurl      bool
 	DisableMediaUnfurl     bool
+	AutoScrollOnNewMessage bool
 }
 
 func newTheme() *Theme {
@@ -245,8 +246,9 @@ func newTheme() *Theme {
 			Composer: uiDefault,
 			Code:     monoDefault,
 		},
-		ShowStatusBar:        true,
-		ShowUnreadOnCollapse: true,
+		ShowStatusBar:          true,
+		ShowUnreadOnCollapse:   true,
+		AutoScrollOnNewMessage: true,
 	}
 }
 

@@ -15,6 +15,7 @@ type UIState struct {
 	ShowStatusBar          bool              `json:"show_status_bar"`
 	DisableLinkUnfurl      bool              `json:"disable_link_unfurl"`
 	DisableMediaUnfurl     bool              `json:"disable_media_unfurl"`
+	AutoScrollOnNewMessage bool              `json:"auto_scroll_on_new_message"`
 	Favorites              []string          `json:"favorites"`
 	CollapsedGroups        []string          `json:"collapsed_groups"`
 	ReadTimestamps         map[string]string `json:"read_timestamps"`
@@ -51,6 +52,7 @@ func DefaultUIState() UIState {
 		HideEmptyChannels:      false,
 		ShowUnreadOnCollapse:   true,
 		ShowStatusBar:          true,
+		AutoScrollOnNewMessage: true,
 		Favorites:              []string{},
 		CollapsedGroups: []string{},
 		ReadTimestamps:  make(map[string]string),

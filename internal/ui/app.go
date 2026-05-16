@@ -173,12 +173,14 @@ func Run(client *slack.Client, cfg *config.Config) error {
 	a.th.ShowStatusBar = state.ShowStatusBar
 	a.th.DisableLinkUnfurl = state.DisableLinkUnfurl
 	a.th.DisableMediaUnfurl = state.DisableMediaUnfurl
+	a.th.AutoScrollOnNewMessage = state.AutoScrollOnNewMessage
 	a.client.SetUnfurlSettings(a.th.DisableLinkUnfurl, a.th.DisableMediaUnfurl)
 	a.backgroundTasks = make(map[string]string)
 	a.channels.SetFavorites(state.Favorites, a.onFavoritesChanged)
 	a.channels.SetCollapsedGroups(state.CollapsedGroups, a.onCollapsedGroupsChanged)
 	a.channels.SetHidden(a.cfg.Channels.Hidden)
 	a.messages = newMessagesView(images)
+	a.messages.SetAutoScroll(a.th.AutoScrollOnNewMessage)
 	a.composer = newComposer()
 	a.uploadProgress.Store(-1)
 	a.switcher = newQuickSwitcher(a.onSwitcherSelect, a.onSwitcherSearch)
@@ -994,8 +996,15 @@ func (a *App) handleKeys(gtx layout.Context) {
 			// Drill-in progression on the messages pane:
 			//   channel-history selection > thread view
 			//   thread selection         > author detail panel
+			//   author detail panel       > avatar lightbox
 			// Without a selection, l just moves focus to the messages pane.
 			switch {
+			case a.messages.AuthorOpen():
+				if f, ok := a.messages.AuthorPhoto(); ok {
+					a.imageViewer.SetFiles([]slack.File{f})
+					a.imageViewerOpen = true
+					a.w.Invalidate()
+				}
 			case a.focusPane == paneMessages && a.messages.HasThreadSelection():
 				if a.messages.OpenAuthor(a.fmt) {
 					a.w.Invalidate()
@@ -1571,8 +1580,10 @@ func (a *App) onFontsChanged() {
 	state.ShowStatusBar = a.th.ShowStatusBar
 	state.DisableLinkUnfurl = a.th.DisableLinkUnfurl
 	state.DisableMediaUnfurl = a.th.DisableMediaUnfurl
+	state.AutoScrollOnNewMessage = a.th.AutoScrollOnNewMessage
 	config.SaveUIState(state)
 	a.client.SetUnfurlSettings(a.th.DisableLinkUnfurl, a.th.DisableMediaUnfurl)
+	a.messages.SetAutoScroll(a.th.AutoScrollOnNewMessage)
 	a.w.Invalidate()
 }
 
